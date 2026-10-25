@@ -1,0 +1,25 @@
+[Unit]
+Description=ELOG AI (search, assistant and analysis for ELOG)
+After=network.target elogd.service ollama.service
+
+[Service]
+Type=simple
+# the account elogd runs as: it can read elogd.cfg, the password file and the logbooks
+User=elog
+Group=elog
+WorkingDirectory=/opt/elog-ai
+EnvironmentFile=/opt/elog-ai/.env
+ExecStart=/opt/elog-ai/venv/bin/python -m elogai --env-file /opt/elog-ai/.env
+StateDirectory=elog-ai
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/elog-ai
+# low priority for the background work; interactive requests are prioritised inside
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

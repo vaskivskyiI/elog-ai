@@ -1,0 +1,42 @@
+# ELOG AI next to an elogd on the same host (native or in Docker).
+#
+#   cp .env.example .env            # provider, models; ELOG_DIR_HOST / ELOG_DATA_HOST below
+#   docker compose up -d --build
+#   docker compose --profile ollama up -d      # also run Ollama in a container
+#
+# The two ELOG folders are mounted read-only at the paths elogd.cfg uses, so "Logbook dir"
+# and "Password file" are valid inside the container too.
+
+services:
+  elog-ai:
+    build: .
+    image: elog-ai:latest
+    restart: unless-stopped
+    user: "${ELOG_UID:-1000}:${ELOG_GID:-1000}"
+    env_file: .env
+    environment:
+      ELOG_DIR: /usr/local/elog
+      ELOGAI_STATE_DIR: /state
+      ELOGAI_HOST: 0.0.0.0
+    # host network: elogd's access checks go to 127.0.0.1:<Port>, Ollama to 127.0.0.1:11434
+    network_mode: host
+    volumes:
+      - ${ELOG_DIR_HOST:-/usr/local/elog}:/usr/local/elog:ro
+      - ${ELOG_DATA_HOST:-/mnt/elog_data}:/mnt/elog_data:ro
+      - state:/state
+
+  ollama:
+    profiles: ["ollama"]
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      OLLAMA_HOST: 127.0.0.1:11434
+      OLLAMA_KEEP_ALIVE: 30m
+      OLLAMA_NUM_PARALLEL: 1
+    volumes:
+      - ollama:/root/.ollama
+
+volumes:
+  state:
+  ollama:
