@@ -447,4 +447,11 @@ def main(argv=None):
     from waitress import serve
     log.info("listening on %s:%d, elogd.cfg %s, state %s", conf["host"], conf["port"], conf["elogd_cfg"],
              conf["state_dir"])
-    serve(app, host=conf["host"], port=conf["port"], threads=12, channel_timeout=600)
+    serve(app, **serve_options(conf))
+
+
+def serve_options(conf: dict) -> dict:
+    # waitress drops X-Forwarded-For by default; auth.py needs it to check ELOG sessions, which
+    # elogd binds to the browser's address. Only nginx reaches us (we listen on 127.0.0.1).
+    return {"host": conf["host"], "port": conf["port"], "threads": 12, "channel_timeout": 600,
+            "clear_untrusted_proxy_headers": False}

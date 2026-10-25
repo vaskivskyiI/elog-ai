@@ -123,3 +123,24 @@ def test_suggest_similar_only_readable(app):
     r = client(app, "bob").post("/api/assist/suggest", json={
         "logbook": "Laser", "text": "<p>Cut S-179 for the classified run, compressor broken afterwards.</p>"}).json
     assert not leaks(r)
+
+
+def test_session_check_through_waitress(app):
+    """The real server, not Flask's test client: X-Forwarded-For must reach the access check."""
+    import threading
+    import urllib.request
+
+    from waitress import create_server
+
+    from elogai.app import serve_options
+    opts = serve_options({"host": "127.0.0.1", "port": 0})
+    opts.pop("port")
+    srv = create_server(app, port=0, **{k: v for k, v in opts.items() if k != "host"}, host="127.0.0.1")
+    threading.Thread(target=srv.run, daemon=True).start()
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{srv.effective_port}/api/me",
+                                     headers={"Cookie": "sid=bob", "X-Forwarded-For": CLIENT_IP})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            assert json.loads(r.read())["login"] == "bob"
+    finally:
+        srv.close()
