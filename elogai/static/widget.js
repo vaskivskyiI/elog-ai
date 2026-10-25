@@ -157,17 +157,27 @@
   function entryPanel() {
     var anchor = $('.messageframe') || $('td.attribhead');
     var host = anchor && (anchor.closest('table.frame') || anchor.closest('table'));
-    var body = h('div', { class: 'eai-body' }, h('span', { class: 'eai-muted' }, 'Loading…'));
-    var panel = h('details', { class: 'eai-panel', open: localStorage.getItem('eai-closed') !== '1' },
-      h('summary', null, h('span', { class: 'eai-spark' }, '✦'), ' AI', h('span', { class: 'eai-sub' }, '')), body);
-    panel.addEventListener('toggle', function () { try { localStorage.setItem('eai-closed', panel.open ? '0' : '1'); } catch (e) {} });
+    var panel = aiPanel(LOGBOOK, MID, false);
     if (host && host.parentNode) host.parentNode.insertBefore(panel, host.nextSibling);
     else document.body.appendChild(panel);
+  }
+
+  // The AI panel of one entry: on the entry page (wide, two columns) and in the list's preview
+  // panel (compact). It loads itself and keeps polling while the entry is being analysed.
+  function aiPanel(lb, mid, compact) {
+    var key = compact ? 'eai-closed-preview' : 'eai-closed';
+    var body = h('div', { class: 'eai-body' }, h('span', { class: 'eai-muted' }, 'Loading…'));
+    var open = true;
+    try { open = localStorage.getItem(key) !== '1'; } catch (e) {}
+    var panel = h('details', { class: 'eai-panel' + (compact ? ' eai-compact' : ''), open: open },
+      h('summary', null, h('span', { class: 'eai-spark' }, '✦'), ' AI', h('span', { class: 'eai-sub' }, '')), body);
+    panel.addEventListener('toggle', function () { try { localStorage.setItem(key, panel.open ? '0' : '1'); } catch (e) {} });
     var tries = 0;
     function load() {
-      api('entry?logbook=' + encodeURIComponent(LOGBOOK) + '&mid=' + MID).then(function (d) {
+      api('entry?logbook=' + encodeURIComponent(lb) + '&mid=' + mid).then(function (d) {
+        if (!panel.isConnected && tries) return;      // the preview moved on to another entry
         render(d);
-        if (d.pending && tries++ < 12) setTimeout(load, 5000);
+        if (d.pending && tries++ < 12) setTimeout(function () { if (panel.isConnected) load(); }, 5000);
       }).catch(function (e) {
         if (e.status === 401 || e.status === 404) panel.remove();
         else body.innerHTML = '<span class="eai-muted">AI unavailable: ' + esc(e.message) + '</span>';
@@ -214,27 +224,57 @@
         if (d.thread.summary) ts.innerHTML = md(d.thread.summary);
         else ts.appendChild(h('button', { class: 'eai-btn', onclick: function (e) {
           e.target.disabled = true; e.target.textContent = 'Summarising ' + d.thread.entries + ' entries…';
-          api('thread/summary', { logbook: LOGBOOK, mid: MID }).then(function (r) { ts.innerHTML = md(r.text || 'Nothing to summarise.'); })
+          api('thread/summary', { logbook: lb, mid: mid }).then(function (r) { ts.innerHTML = md(r.text || 'Nothing to summarise.'); })
             .catch(function (x) { ts.textContent = x.message; });
         } }, 'Summarise this thread (' + d.thread.entries + ' entries)'));
         left.appendChild(ts);
       }
       right.appendChild(h('div', { class: 'eai-h' }, 'Related entries'));
       if (!d.similar.length) right.appendChild(h('div', { class: 'eai-muted' }, 'None found yet.'));
-      d.similar.forEach(function (s) {
+      d.similar.slice(0, compact ? 4 : 8).forEach(function (s) {
         right.appendChild(h('a', { class: 'eai-rel', href: entryUrl(s.logbook, s.mid), title: s.summary || s.snippet || '' },
-          h('span', { class: 'eai-ref' }, (s.logbook !== LOGBOOK ? s.logbook + ' ' : '') + '#' + s.mid),
+          h('span', { class: 'eai-ref' }, (s.logbook !== lb ? s.logbook + ' ' : '') + '#' + s.mid),
           h('span', null, s.subject || s.summary || (s.snippet || '').slice(0, 60)),
           h('span', { class: 'eai-muted' }, fmt(s.time))));
       });
       right.appendChild(h('div', { class: 'eai-actions' },
-        h('button', { class: 'eai-btn', onclick: function () { openDrawer('Regarding ' + LOGBOOK + ' #' + MID + ': '); } }, 'Ask about this'),
+        h('button', { class: 'eai-btn', onclick: function () { openDrawer('Regarding ' + lb + ' #' + mid + ': '); } }, 'Ask about this'),
         a && a.fresh ? null : h('button', { class: 'eai-btn', onclick: function (e) {
           e.target.disabled = true; e.target.textContent = 'Analysing…';
-          api('entry/analyze', { logbook: LOGBOOK, mid: MID }).then(render).catch(function (x) { e.target.textContent = x.message; });
+          api('entry/analyze', { logbook: lb, mid: mid }).then(render).catch(function (x) { e.target.textContent = x.message; });
         } }, 'Analyse now')));
     }
     load();
+    return panel;
+  }
+
+  // ---- list page preview ("quick view") ---------------------------------------------------------
+
+  // The F7 theme fills .f7-preview .f7-pv-body with the clicked entry; add the AI panel on top.
+  function previewPanels() {
+    var watched = null;
+    function attach(pv) {
+      if (watched === pv) return;
+      watched = pv;
+      var body = $('.f7-pv-body', pv);
+      if (!body) return;
+      new MutationObserver(function () {
+        if (!$('table.frame', body) || $('.eai-panel', body)) return;
+        var href = ($('.f7-pv-open', pv) || {}).href || '';
+        var m = /\/([^/?#]+)\/(\d+)(?:[?#].*)?$/.exec(href);
+        if (!m) return;
+        var lb = decodeURIComponent(m[1]);
+        if (lb.toLowerCase() !== LOGBOOK.toLowerCase()) return;
+        body.insertBefore(aiPanel(LOGBOOK, +m[2], true), body.firstChild);
+      }).observe(body, { childList: true });
+    }
+    var pv = $('.f7-preview');
+    if (pv) attach(pv);
+    // the theme creates the panel on the first click
+    new MutationObserver(function () {
+      var p = $('.f7-preview');
+      if (p) attach(p);
+    }).observe(document.body, { childList: true });
   }
 
   // ---- edit page assistant ---------------------------------------------------------------------
@@ -329,6 +369,7 @@
       css();
       askButton();
       if (isEntry) entryPanel();
+      if (isList) previewPanels();
       if (isEdit && d.features.chat) editAssist();
     }).catch(function () { /* AI not available: ELOG works as before */ });
   }

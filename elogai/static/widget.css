@@ -16,6 +16,10 @@
 .eai-body { padding: 0 12px 12px; }
 .eai-cols { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 20px; }
 @media (max-width: 760px) { .eai-cols { grid-template-columns: 1fr; } }
+/* in the list's preview panel: one column, above the entry */
+.eai-compact { margin: 0 0 10px; }
+.eai-compact .eai-cols { grid-template-columns: 1fr; gap: 8px; }
+.eai-compact .eai-summary { font-size: 13px; }
 .eai-summary { margin: 0 0 6px; font-size: 14px; }
 .eai-chips { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0; align-items: center; }
 .eai-chip { display: inline-block; padding: 0 8px; border-radius: 999px; background: var(--eai-surface-3); color: var(--eai-text) !important; font-size: 12px; text-decoration: none !important; white-space: nowrap; }
