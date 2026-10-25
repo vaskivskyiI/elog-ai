@@ -439,7 +439,11 @@ def main(argv=None):
         ix = Indexer(conf["elogd_cfg"])
         print(ix.scan())
         return
-    app = create_app(conf, start_worker=not args.no_worker)
+    try:
+        app = create_app(conf, start_worker=not args.no_worker)
+    except PermissionError as e:
+        print(f"elog-ai: {e}", file=sys.stderr)
+        sys.exit(2)
     from waitress import serve
     log.info("listening on %s:%d, elogd.cfg %s, state %s", conf["host"], conf["port"], conf["elogd_cfg"],
              conf["state_dir"])

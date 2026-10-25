@@ -77,7 +77,17 @@ _write_lock = threading.RLock()
 
 def init(state_dir: str) -> str:
     global _path
-    os.makedirs(state_dir, exist_ok=True)
+    try:
+        os.makedirs(state_dir, exist_ok=True)
+        probe = os.path.join(state_dir, ".write-test")
+        with open(probe, "w"):
+            pass
+        os.remove(probe)
+    except OSError as e:
+        user = f"uid {os.getuid()}" if hasattr(os, "getuid") else "this user"
+        raise PermissionError(
+            f"cannot write the state directory {state_dir} as {user} ({e.strerror}). In Docker, make the volume "
+            f"writable: docker compose run --rm -u root elog-ai chown $ELOG_UID:$ELOG_GID /state") from None
     _path = os.path.join(state_dir, "elog-ai.sqlite")
     _local.__dict__.clear()
     c = conn()
