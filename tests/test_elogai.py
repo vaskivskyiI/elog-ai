@@ -396,3 +396,10 @@ def test_suggest(app):
 def test_widget_served(app):
     r = app.test_client().get("/widget.js")
     assert r.status_code == 200 and b"elog-ai" in r.data
+
+
+def test_embedding_prefixes():
+    from elogai.vectors import prefixes
+    q, d = prefixes("qwen3-embedding:4b")
+    assert q.startswith("Instruct: ") and q.endswith("Query: ") and d == ""
+    assert prefixes("bge-m3") == ("", "")

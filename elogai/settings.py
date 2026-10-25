@@ -37,7 +37,7 @@ PATH_VARS = ("ELOG_DIR", "ELOGD_CFG", "ELOGAI_STATE_DIR")
 
 DEFAULT_MODELS = {
     # provider: (chat, fast, embed)
-    "ollama": ("qwen3:8b", "qwen3:4b", "bge-m3"),
+    "ollama": ("gemma4:31b", "gemma4:latest", "qwen3-embedding:4b"),
     "openai": ("gpt-5-mini", "gpt-5-nano", "text-embedding-3-small"),
     "anthropic": ("claude-sonnet-5-5", "claude-haiku-5-5", ""),
     "gemini": ("gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-embedding-001"),

@@ -11,7 +11,7 @@ from . import db, prompts, providers, search
 from .ai import AI
 from .indexer import norm
 
-CONTEXT_CHARS = int(os.environ.get("AI_CONTEXT_CHARS") or 14000)
+CONTEXT_CHARS = int(os.environ.get("AI_CONTEXT_CHARS") or 30000)
 MONTHS = {m.lower(): i for i, m in enumerate(calendar.month_name) if m}
 MONTHS.update({m.lower(): i for i, m in enumerate(calendar.month_abbr) if m})
 

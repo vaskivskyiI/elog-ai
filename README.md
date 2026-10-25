@@ -108,23 +108,39 @@ and says how many matching entries it left out.
 
 ## Models (remote Ollama)
 
-The ELOG server (16 CPU cores, no GPU) only runs this service; the models run on an Ollama server
-elsewhere in the network:
+The ELOG server (16 CPU cores, no GPU) only runs this service; the models run on a remote Ollama.
+Behind Open WebUI, use its Ollama proxy (`<open-webui URL>/ollama`) with an Open WebUI API key:
 
 ```
 AI_PROVIDER=ollama
-AI_BASE_URL=http://gpu-host.example.org:11434  # embeddings use the same server unless AI_EMBED_BASE_URL is set
-AI_API_KEY=...                                 # only if that Ollama sits behind a proxy that wants a bearer token
-AI_CHAT_MODEL=qwen3:14b                        # answers, digests
-AI_FAST_MODEL=qwen3:8b                         # background analysis of every entry
-AI_EMBED_MODEL=bge-m3                          # multilingual (English and Slovenian)
+AI_BASE_URL=https://openwebui.example.org/ollama
+AI_API_KEY=sk-...
+AI_CHAT_MODEL=gemma4:31b             # answers, digests, thread summaries
+AI_FAST_MODEL=gemma4:latest          # background analysis of every entry
+AI_EMBED_MODEL=qwen3-embedding:4b    # semantic search
+AI_VISION_MODEL=qwen2.5vl:7b         # optional: image attachments
+AI_NUM_CTX=16384
+AI_CONTEXT_CHARS=30000
 ```
 
-On the Ollama host: `ollama pull bge-m3`, `ollama pull qwen3:8b`, `ollama pull qwen3:14b`, and let it
-listen on the network (`OLLAMA_HOST=0.0.0.0`), firewalled to the ELOG server. The *Status* page shows
-whether each model is reachable and pulled. Entry texts travel to that host: use a host inside the
-institute, or put a TLS proxy in front. An Ollama server counts as self-hosted, so
-`AI_PRIVATE_LOGBOOKS` (logbooks that must not go to an external API) does not exclude it.
+Why these, from the models on that server:
+
+| Task | Model | Reason | Alternative |
+|---|---|---|---|
+| Answers, digests | `gemma4:31b` | newest large model there, 256k context, good in Slovenian (the Slovenian GaMS models are Gemma-based) | `qwen3.8:latest` (27B, same class) |
+| Background analysis | `gemma4:latest` (8B) | thousands of short JSON extractions: speed matters more than size | `hf.co/mradermacher/GaMS3-12B-Instruct-GGUF:Q4_K_M` if Slovenian entries come out poorly |
+| Embeddings | `qwen3-embedding:4b` | the only real embedding model there; multilingual; queries get its retrieval instruction automatically | (`bge-m3` is not installed; the `dengcao/...` Q8 copy is registered as a completion model) |
+| Images | `qwen2.5vl:7b` | reads plots and screenshots well, small | `qwen2.5vl:32b` |
+
+Not used: reasoning-only models (`deepseek-r1`, `QwQ`, `phi4-reasoning`, `qwen3:30b-a3b-thinking`)
+spend most of their time thinking; thinking is switched off for gemma4 and qwen3.8 (`think: false`).
+Old or very large models (`llama3.3`, `cogito:70b`, `llama4:scout`, fp16 Mistral) are slower without
+being better at this. Changing `AI_EMBED_MODEL` later means re-embedding everything (*Status → Redo
+embeddings*, minutes on a GPU).
+
+The *Status* page shows whether each model is reachable and available. Entry texts travel to that
+host: an Ollama/Open WebUI server counts as self-hosted, so `AI_PRIVATE_LOGBOOKS` (logbooks that must
+not go to an external API) does not exclude it.
 
 Other providers work the same way (`openai` for any OpenAI-compatible server such as vLLM,
 `anthropic`, `gemini`), also mixed, e.g. an API for answers and Ollama for embeddings.

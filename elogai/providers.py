@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 import time
 import urllib.error
@@ -211,7 +212,8 @@ class Ollama(Provider):
 
     def _body(self, messages, system, model, max_tokens, temperature, stream):
         body = {"model": model, "messages": self._msgs(messages, system), "stream": stream,
-                "options": {"temperature": temperature, "num_predict": max_tokens, "num_ctx": 8192},
+                "options": {"temperature": temperature, "num_predict": max_tokens,
+                            "num_ctx": int(os.environ.get("AI_NUM_CTX") or 16384)},
                 "keep_alive": "30m"}
         if self.think_ok:
             body["think"] = False

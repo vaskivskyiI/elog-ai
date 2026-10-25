@@ -17,6 +17,10 @@ MAX_CHUNKS = 8
 def prefixes(model: str) -> tuple[str, str]:
     """Query / document prefixes some embedding models are trained with."""
     m = model.lower()
+    if "qwen3-embedding" in m:
+        # instruction-tuned: queries carry the task, documents go in as they are
+        return ("Instruct: Given a question or keywords about laboratory work, retrieve logbook entries "
+                "that answer it\nQuery: "), ""
     if "nomic" in m:
         return "search_query: ", "search_document: "
     if "e5" in m:
