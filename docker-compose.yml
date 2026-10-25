@@ -17,7 +17,7 @@ services:
     environment:
       ELOG_DIR: /usr/local/elog
       ELOGAI_STATE_DIR: /state
-      ELOGAI_HOST: 0.0.0.0
+      ELOGAI_HOST: 127.0.0.1     # host network: reachable only through nginx
     # host network: elogd's access checks go to 127.0.0.1:<Port>, Ollama to 127.0.0.1:11434
     network_mode: host
     volumes:
