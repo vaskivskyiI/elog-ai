@@ -709,30 +709,44 @@
   // ---- runs ------------------------------------------------------------------------------------
 
   routes.runs = function (p) {
-    var q = p.q || '';
+    var q = p.q || '', lbs = p.logbooks ? p.logbooks.split(',') : pref('runs-logbooks', []);
     var input = h('input', { type: 'search', value: q, placeholder: 'TaS2, Legend OUT > 2.5, pump_ND.currentposition >= 10 …', style: 'min-width:420px' });
-    var out = h('div');
+    var out = h('div'), info = h('div', { class: 'muted small', style: 'margin:6px 0' });
     main.appendChild(h('h1', null, 'Runs'));
-    main.appendChild(h('p', { class: 'sub' }, 'Data acquisition runs, read from the run description (.ini) attached to DAQ entries, with the conditions at run start (last readings of the logbook and its related logbooks). Search: words, and conditions on parameters or readings separated by commas, e.g. "TaS2, Legend OUT > 2.5".'));
-    main.appendChild(h('div', { class: 'row', style: 'margin-bottom:12px' }, input));
+    main.appendChild(h('p', { class: 'sub' }, 'Measurement runs, each with all its entries (start, notes, end). A run is identified by its run number ' +
+      '(e.g. RunN), otherwise by the file named in the File attribute (`AI run id = <attribute>` in elogd.cfg sets it per logbook). ' +
+      'Run descriptions (.ini) and the readings at run start are added. Search: words, and conditions on parameters or readings, separated by commas.'));
+    main.appendChild(h('div', { class: 'row', style: 'margin-bottom:6px' }, multiSelect(lbs, function (s) { lbs = s; setPref('runs-logbooks', s); load(); }, { down: true }), input));
+    main.appendChild(info);
     main.appendChild(out);
     var timer;
     input.addEventListener('input', function () { clearTimeout(timer); timer = setTimeout(function () { q = input.value.trim(); load(); }, 300); });
+    function dur(hrs) { return hrs >= 48 ? Math.round(hrs / 24) + ' d' : hrs >= 1 ? hrs + ' h' : Math.round(hrs * 60) + ' min'; }
     function load() {
-      setHash('runs', { q: q }, true);
+      setHash('runs', { q: q, logbooks: lbs }, true);
       out.innerHTML = ''; out.appendChild(loading());
-      api('insights/runs?' + qs({ q: q })).then(function (rows) {
+      api('insights/runs?' + qs({ q: q, logbooks: lbs })).then(function (rows) {
         out.innerHTML = '';
+        info.textContent = rows.length + (rows.length >= 300 ? '+' : '') + ' runs';
         if (!rows.length) { out.appendChild(h('div', { class: 'empty' }, 'No runs found.')); return; }
-        var tb = h('table', { class: 't' }, h('tr', null, h('th', null, 'Run'), h('th', null, 'Logbook'), h('th', null, 'Sample'), h('th', null, 'Info'), h('th', null, 'Start'), h('th', null, 'End'), h('th', null, '')));
+        var tb = h('table', { class: 't' }, h('tr', null, h('th', null, 'Run'), h('th', null, 'Logbook'), h('th', null, 'Sample'), h('th', null, 'Info'),
+          h('th', null, 'Started'), h('th', null, 'Length'), h('th', null, 'Entries'), h('th', null, '')));
         rows.forEach(function (r) {
-          var det = h('tr', { class: 'hidden' }, h('td', { colspan: 7 }, h('div', { class: 'small', style: 'columns: 3 260px; font-family: var(--mono)' },
-            Object.keys(r.params).map(function (k) { return h('div', null, k + ' = ' + r.params[k]); }))));
+          var det = h('tr', { class: 'hidden' }, h('td', { colspan: 8 },
+            h('div', { class: 'results', style: 'margin:4px 0 8px' }, r.entries.map(function (e) {
+              return h('div', null, h('a', { href: entryUrl(r.logbook, e.mid), target: '_blank' }, '#' + e.mid), ' ',
+                h('span', { class: 'muted small' }, fmtDate(e.time, true) + ' ' + (e.author || '')), ' ', e.subject || '', e.summary ? h('span', { class: 'muted' }, ' — ' + e.summary) : null);
+            })),
+            r.files.length ? h('div', { class: 'small' }, 'Files: ' + r.files.join(', ')) : null,
+            Object.keys(r.params).length ? h('div', { class: 'small', style: 'columns: 3 260px; font-family: var(--mono); margin-top:6px' },
+              Object.keys(r.params).map(function (k) { return h('div', null, k + ' = ' + r.params[k]); })) : null));
           tb.appendChild(h('tr', { class: 'click', onclick: function () { det.classList.toggle('hidden'); } },
-            h('td', null, h('a', { href: entryUrl(r.logbook, r.mid), target: '_blank', onclick: function (e) { e.stopPropagation(); } }, h('b', null, r.name))),
+            h('td', null, h('a', { href: entryUrl(r.logbook, r.mid), target: '_blank', onclick: function (e) { e.stopPropagation(); } }, h('b', null, r.run)),
+              r.source && r.source !== 'RunN' ? h('div', { class: 'muted small' }, r.source) : null),
             h('td', { class: 'muted' }, r.logbook), h('td', null, r.sample), h('td', null, r.info),
-            h('td', { class: 'muted small' }, r.start), h('td', { class: 'muted small' }, r.end),
-            h('td', null, r.interrupted ? h('span', { class: 'chip warn' }, 'interrupted') : null,
+            h('td', { class: 'muted small' }, fmtDate(r.first, true)), h('td', { class: 'muted small' }, dur(r.duration_h)),
+            h('td', null, r.entries.length),
+            h('td', null, r.status ? h('span', { class: 'chip ' + (r.status === 'interrupted' ? 'warn' : r.status === 'ended' ? 'fixed' : '') }, r.status) : null,
               Object.keys(r.conditions || {}).slice(0, 6).map(function (k) {
                 var c = r.conditions[k];
                 return h('span', { class: 'chip', title: 'last noted ' + fmtDate(c.time, true) + ' (' + c.logbook + ' #' + c.mid + ')' }, k + ' ' + c.raw);

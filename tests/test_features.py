@@ -28,7 +28,7 @@ Use Email from = elog@example.org
 URL = https://elog.example.org/
 
 [Laser]
-Attributes = Author, SN, MP, T, Category, Subject
+Attributes = Author, SN, MP, T, Category, RunN, File, Subject
 Change note MP = Stage position changed from $old to $new
 Empty option MP = Removed
 AI alerts = 1
@@ -76,6 +76,20 @@ def site(tmp_path_factory):
         log += entry(10 + i, d(NOW - ago * DAY + 3600), {"Author": "alice", "SN": "", "MP": "", "T": val,
                                                        "Category": "Routine entry", "Subject": "Readings"},
                      f"<p>Temperature {val} K</p>")
+    # run 7: started, a note, ended (RunN); measurements named by their data file; a folder and
+    # a file shared over weeks are not runs
+    for mid, (ago, attrs, subj, text) in enumerate([
+            (6.0, {"RunN": "7", "File": ""}, "Run started", "Pump-probe on S-9 at 300 K. New run started by script x.py"),
+            (5.9, {"RunN": "7", "File": ""}, "Re: Run started", "Signal looks fine"),
+            (5.8, {"RunN": "7", "File": ""}, "Run ended", "Run ended"),
+            (4.0, {"RunN": "", "File": r'<a href="file://srv\data\scan_12.h5">scan_12.h5</a>'}, "Scan 12", "First half"),
+            (3.9, {"RunN": "", "File": r"C:\data\scan_12.h5"}, "Scan 12 continued", "Second half"),
+            (3.5, {"RunN": "", "File": "C:\\data\\"}, "Folder", "Not a run"),
+            (30, {"RunN": "", "File": "common"}, "Old", "Shared file name"),
+            (1, {"RunN": "", "File": "common"}, "New", "Shared file name")], start=50):
+        log += entry(mid, d(NOW - int(ago * DAY)), {"Author": "alice", "SN": "", "MP": "", "T": "", "Category": "Info",
+                                                    "RunN": attrs["RunN"], "File": attrs["File"], "Subject": subj},
+                     f"<p>{text}</p>")
     # a problem that stays open
     log += entry(40, d(NOW - 9 * DAY), {"Author": "bob", "SN": "", "MP": "", "T": "", "Category": "Problem",
                                         "Subject": "Pump broken"}, "<p>The turbo pump is broken, error on start.</p>")
@@ -241,3 +255,41 @@ def test_eval_runner(app, tmp_path):
     rep = evaluate.run(x(app)["ai"], x(app)["ix"], str(q))
     assert rep["summary"]["recall"] == 1.0 and rep["results"][0]["rank"] >= 1
     assert db.scalar("SELECT count(*) FROM conversations WHERE user = 'eval'") == 0
+
+
+
+# ---- runs ----------------------------------------------------------------------------------------
+
+def test_runs_group_their_entries(app):
+    c = client(app, "bob")
+    rows = c.get("/api/insights/runs?logbooks=Laser").json
+    by = {r["run"]: r for r in rows}
+    assert [e["subject"] for e in by["7"]["entries"]] == ["Run started", "Re: Run started", "Run ended"]
+    assert by["7"]["status"] == "ended" and by["7"]["source"] == "RunN" and by["7"]["info"].startswith("Pump-probe on S-9")
+    assert len(by["scan_12"]["entries"]) == 2 and by["scan_12"]["source"] == "File"     # link and path: same file
+    assert "common" not in by and "" not in by                                             # 29 days apart; a folder
+    assert c.get("/api/insights/runs?logbooks=Secret").json == []                          # not readable for bob
+    assert [r["run"] for r in c.get("/api/insights/runs?q=scan_12&logbooks=Laser").json] == ["scan_12"]
+    assert [r["run"] for r in c.get("/api/insights/runs?q=7&logbooks=Laser").json] == ["7"]
+
+
+def test_run_id_setting(app, site):
+    x_ = x(app)
+    cfg = os.path.join(site, "elogd.cfg")
+    text = open(cfg).read()
+    open(cfg, "w").write(text.replace("AI related = Secret", "AI related = Secret\nAI run id = File"))
+    os.utime(cfg, (time.time() + 20, time.time() + 20))
+    x_["ix"].load_config()
+    rows = insights.runs(set(x_["ix"].logbooks.values()), "", 100, logbooks=["Laser"], cfg=x_["ix"].cfg)
+    runs = {r["run"] for r in rows}
+    assert "7" not in runs and "common" in runs              # explicit: File only, also over a long time
+    open(cfg, "w").write(text)
+    os.utime(cfg, (time.time() + 40, time.time() + 40))
+    x_["ix"].load_config()
+
+
+def test_assistant_gets_the_whole_run(app):
+    r = client(app, "alice").post("/api/ask", json={"question": "What happened in run 7?"})
+    assert r.data
+    prompt = [b for p, b in Handler.calls if p == "/api/chat" and "You are the assistant" in json.dumps(b["messages"][0])][-1]
+    assert "run 7 in Laser" in prompt["messages"][-1]["content"] and "Run ended" in prompt["messages"][-1]["content"]

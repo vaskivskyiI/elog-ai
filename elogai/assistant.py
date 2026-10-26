@@ -201,22 +201,27 @@ def companions(ai: AI, query: str, res: list[dict], allowed: set[int], top: int 
     return out[:limit]
 
 
-def runs_context(question: str, allowed: set[int]) -> str:
-    """Runs of samples or run numbers the question names (DAQ run descriptions)."""
-    words = [w for w in re.findall(r"[\w\-.]+", question) if len(w) >= 3]
+def runs_context(question: str, allowed: set[int], ai: AI | None = None) -> str:
+    """Runs the question names by number, sample or file (all entries of each run together)."""
+    from .insights import runs
+    words = [w for w in re.findall(r"[\w\-.]+", question) if len(w) >= 3 or w.isdigit()]
     if not words or not allowed:
         return ""
     norms = {norm(w) for w in words}
-    rows = db.all(f"""SELECT r.name, r.sample, r.info, r.start, r.end, r.interrupted, l.name AS logbook, e.mid
-                      FROM runs r JOIN entries e ON e.id = r.entry_id JOIN logbooks l ON l.id = e.logbook_id
-                      WHERE e.logbook_id IN ({','.join('?' * len(allowed))})
-                      ORDER BY e.time DESC LIMIT 2000""", *sorted(allowed))
-    hits = [r for r in rows if norm(r["sample"] or "") in norms or norm(r["name"] or "") in norms][:15]
+    nums = {str(int(w)) for w in words if w.isdigit()}
+    cfg = ai.ctx.ix.cfg if ai and ai.ctx else None
+    hits = [g for g in runs(allowed, "", 5000, ctx=None, cfg=cfg, with_conditions=False)
+            if g["run"] in nums or norm(g["run"]) in norms or (g["sample"] and norm(g["sample"]) in norms)
+            or any(norm(f) in norms for f in g["files"])][:12]
     if not hits:
         return ""
-    lines = [f"[{r['logbook']} #{r['mid']}] run {r['name']}: sample {r['sample']}; {r['info']}; "
-             f"{r['start']} → {r['end']}{' (interrupted)' if r['interrupted'] else ''}" for r in hits]
-    return "DAQ runs matching the question:\n" + "\n".join(lines)
+    lines = []
+    for g in hits:
+        when = datetime.fromtimestamp(g["first"]).strftime("%Y-%m-%d %H:%M")
+        ents = "; ".join(f"[{g['logbook']} #{e['mid']}] {e['subject'] or e['summary'] or ''}".strip() for e in g["entries"][:8])
+        lines.append(f"run {g['run']} in {g['logbook']}: sample {g['sample'] or '?'}; {g['info']}; from {when}, "
+                     f"{g['duration_h']} h{', ' + g['status'] if g['status'] else ''}. Entries: {ents}")
+    return "Runs matching the question (all entries of each run):\n" + "\n".join(lines)
 
 
 def lifecycle_context(question: str, allowed: set[int], cfg) -> str:
@@ -255,7 +260,7 @@ def ask(ai: AI, user: str, question: str, allowed: set[int], scope: dict, conver
     readable = [r for r in rows if ai.may_send([r["logbook"]])]
     withheld = len(rows) - len(readable)
     ctx, used = _context(readable, CONTEXT_CHARS)
-    extra = "\n\n".join(x for x in (runs_context(question, allowed),
+    extra = "\n\n".join(x for x in (runs_context(question, allowed, ai),
                                      lifecycle_context(question, allowed, ai.ctx.ix.cfg if ai.ctx else None)) if x)
     sources = [{**{k: r[k] for k in ("id", "mid", "logbook", "date", "time", "author", "subject", "summary", "kind")},
                 "related": bool(r.get("related_to"))} for r in used]

@@ -146,14 +146,6 @@ OPS = {">": lambda a, b: a > b, "<": lambda a, b: a < b, ">=": lambda a, b: a >=
        "=": lambda a, b: abs(a - b) < 1e-9, "!=": lambda a, b: abs(a - b) >= 1e-9}
 
 
-def _run_start(r) -> int:
-    from datetime import datetime
-    try:
-        return int(datetime.strptime((r["start"] or "")[:19], "%Y-%m-%d %H:%M:%S").timestamp())
-    except ValueError:
-        return r["time"]
-
-
 def run_conditions(lb_ids: list[int], names: dict[int, str], t: int) -> dict[str, dict]:
     """Numeric readings of the given logbooks (its own and related ones) last noted before t."""
     out = {}
@@ -164,48 +156,177 @@ def run_conditions(lb_ids: list[int], names: dict[int, str], t: int) -> dict[str
     return out
 
 
-def runs(allowed: set[int], q: str = "", limit: int = 300, ctx=None) -> list[dict]:
-    """DAQ runs, filtered by text (sample, info, run number, parameters) and by numeric conditions
-    on run parameters and on the conditions at run start, comma separated:
+RUN_ATTR = re.compile(r"^(run\s*n(o|r|um|umber)?\.?|run|run\s*id|scan(\s*n(o|r)?)?|measurement\s*(no|nr)?)$", re.I)
+FILE_ATTR = re.compile(r"^(file(\s*name)?|filename|data(\s*file)?|data\s*path)$", re.I)
+RUN_MAX_DAYS = 14          # an identifier shared over a longer time is a folder or a sample, not a run
+STATUS = [(re.compile(r"interrupt|abort", re.I), "interrupted"), (re.compile(r"\b(ended|finished|stopped|completed|done)\b", re.I), "ended"),
+          (re.compile(r"\b(started|start)\b", re.I), "started")]
+_groups_cache: dict[int, tuple] = {}
+
+
+def file_id(value: str) -> str:
+    """The measurement a File attribute names: the last path component of a link or path, without
+    its extension ("<a href=...\\0905.h5">" -> "0905", "2026-10-08 08-44-37_x_csv" stays)."""
+    v = html_unescape(re.sub(r"<[^>]+>", " ", value or "")).strip()
+    m = re.search(r"href=[\"']([^\"']+)", value or "")
+    if m:
+        v = m.group(1)
+    v = v.strip().strip('"').replace("file://", "")
+    if not v or v.endswith(("\\", "/")):
+        return ""                     # a folder, not a measurement
+    last = re.split(r"[\\/]", v)[-1].strip()
+    return re.sub(r"\.(h5|hdf5|csv|dat|txt|tsv|npy|npz|mat|tif|tiff|png|sxm|3ds|ini)$", "", last, flags=re.I)
+
+
+def html_unescape(s: str) -> str:
+    import html
+    return html.unescape(s)
+
+
+def _run_key_attrs(cfg, lb: str, attrs_seen: set[str]) -> list[str]:
+    explicit = (cfg.get(lb, "AI run id") if cfg else "").strip()
+    if explicit:
+        return [a.strip() for a in explicit.split(",") if a.strip()]
+    return [a for a in attrs_seen if RUN_ATTR.match(a)] + [a for a in attrs_seen if FILE_ATTR.match(a)]
+
+
+def run_groups(lb_id: int, cfg=None) -> list[dict]:
+    """All runs of one logbook: the entries that share a run identifier (`AI run id = <attribute>`,
+    else a run-number attribute such as RunN, else the file named in a File attribute), with the
+    DAQ run description (.ini) of any of them. Cached until an entry of the logbook changes."""
+    stamp = db.get("SELECT count(*), max(indexed_at), max(id) FROM entries WHERE logbook_id = ?", lb_id)
+    stamp = tuple(stamp) + ((cfg.get(db.scalar("SELECT name FROM logbooks WHERE id = ?", lb_id), "AI run id")
+                             if cfg else ""),)
+    hit = _groups_cache.get(lb_id)
+    if hit and hit[0] == stamp:
+        return hit[1]
+    lb = db.scalar("SELECT name FROM logbooks WHERE id = ?", lb_id)
+    rows = db.all("""SELECT e.id, e.mid, e.time, e.author, e.subject, e.attrs_json, e.text, e.attachments_json,
+                            x.summary, x.kind
+                     FROM entries e LEFT JOIN enrich x ON x.entry_id = e.id AND x.hash = e.hash
+                     WHERE e.logbook_id = ? ORDER BY e.time, e.mid""", lb_id)
+    ini = {r["entry_id"]: r for r in db.all("""SELECT r.* FROM runs r JOIN entries e ON e.id = r.entry_id
+                                                WHERE e.logbook_id = ?""", lb_id)}
+    seen = set()
+    parsed = []
+    for r in rows:
+        attrs = db.jl(r["attrs_json"], {})
+        seen.update(k for k, v in attrs.items() if v)
+        parsed.append((r, attrs))
+    keys = _run_key_attrs(cfg, lb, seen)
+    explicit = bool(cfg and (cfg.get(lb, "AI run id") or "").strip())
+    groups: dict[str, dict] = {}
+    for r, attrs in parsed:
+        rid, src = "", ""
+        for k in keys:
+            v = (attrs.get(k) or "").strip()
+            if not v:
+                continue
+            rid = file_id(v) if FILE_ATTR.match(k) else re.sub(r"<[^>]+>", "", v).strip()
+            if rid.isdigit():
+                rid = str(int(rid))
+            if rid:
+                src = k
+                break
+        run_ini = ini.get(r["id"])
+        if not rid and run_ini and run_ini["name"]:
+            rid, src = str(int(run_ini["name"])) if run_ini["name"].isdigit() else run_ini["name"], "run description"
+        if not rid:
+            continue
+        g = groups.setdefault(rid, {"logbook": lb, "run": rid, "source": src, "entries": [], "first": r["time"],
+                                    "last": r["time"], "sample": "", "info": "", "params": {}, "ini_start": "",
+                                    "ini_end": "", "status": "", "files": []})
+        g["entries"].append({"id": r["id"], "mid": r["mid"], "time": r["time"], "author": r["author"],
+                             "subject": r["subject"], "summary": r["summary"] or "", "kind": r["kind"] or "",
+                             "text": (r["text"] or "")[:300]})
+        g["last"] = r["time"]
+        if not g["sample"]:
+            g["sample"] = attrs.get("Sample") or attrs.get("SN") or ""
+        f = file_id(attrs.get("File") or "")
+        if f and f not in g["files"]:
+            g["files"].append(f)
+        for rx, st in STATUS:
+            if rx.search(r["subject"] or "") or (st == "interrupted" and rx.search(r["text"] or "")):
+                if st != "started" or not g["status"]:
+                    g["status"] = st
+                break
+        if run_ini:
+            g["params"].update(db.jl(run_ini["params_json"], {}))
+            g["sample"] = run_ini["sample"] or g["sample"]
+            g["info"] = run_ini["info"] or g["info"]
+            g["ini_start"], g["ini_end"] = run_ini["start"] or g["ini_start"], run_ini["end"] or g["ini_end"]
+            if run_ini["interrupted"]:
+                g["status"] = "interrupted"
+    out = []
+    for g in groups.values():
+        if not explicit and g["last"] - g["first"] > RUN_MAX_DAYS * 86400:
+            continue
+        if not g["info"]:
+            first = g["entries"][0]
+            g["info"] = (first["subject"] or "") if first["subject"] and not re.match(r"^(re:\s*)?run (started|ended)", first["subject"], re.I) \
+                else re.sub(r"\s*New run started by script.*$", "", first["text"] or "", flags=re.S)[:200]
+        g["start"] = g["ini_start"] or ""
+        g["end"] = g["ini_end"] or ""
+        g["duration_h"] = round((g["last"] - g["first"]) / 3600, 1)
+        out.append(g)
+    out.sort(key=lambda g: -g["first"])
+    _groups_cache[lb_id] = (stamp, out)
+    return out
+
+
+def _run_start_ts(g) -> int:
+    from datetime import datetime
+    try:
+        return int(datetime.strptime((g["start"] or "")[:19], "%Y-%m-%d %H:%M:%S").timestamp())
+    except ValueError:
+        return g["first"]
+
+
+def runs(allowed: set[int], q: str = "", limit: int = 300, ctx=None, logbooks: list[str] | None = None,
+         cfg=None, with_conditions: bool = True) -> list[dict]:
+    """Runs of the readable logbooks (optionally only `logbooks`), each with all its entries,
+    filtered by words (run, sample, info, file, entry texts, parameters) and numeric conditions on
+    run parameters and the readings at run start, comma separated:
     `TaS2, Legend OUT > 2.5, pump_ND.currentpositionunits >= 10`."""
-    ins, args = _in(allowed)
     texts, conds = [], []
     for part in [p for p in re.split(r"[,;]", q or "") if p.strip()]:
         m = COND.match(part)
         if m:
             conds.append((norm(m.group(1)), m.group(2), float(m.group(3).replace(",", "."))))
         else:
-            texts.append(part.strip())
-    where, extra = "", []
-    for t in texts:
-        where += " AND (r.sample LIKE ? OR r.info LIKE ? OR r.name = ? OR r.params_json LIKE ?)"
-        extra += [f"%{t}%", f"%{t}%", t, f"%{t}%"]
-    rows = db.all(f"""SELECT r.*, e.mid, e.time, e.logbook_id, l.name AS logbook FROM runs r
-                      JOIN entries e ON e.id = r.entry_id JOIN logbooks l ON l.id = e.logbook_id
-                      WHERE e.logbook_id IN {ins} {where}
-                      ORDER BY e.time DESC LIMIT ?""", *args, *extra, 2000 if conds else limit)
-    names = {r[0]: r[1] for r in db.all("SELECT id, name FROM logbooks")}
+            texts.append(part.strip().lower())
+    names = {r[0]: r[1] for r in db.all("SELECT id, name FROM logbooks WHERE active = 1")}
     ids_of = {v: k for k, v in names.items()}
+    want = {ids_of[n] for n in (logbooks or []) if n in ids_of}
+    lb_ids = [i for i in names if i in allowed and (not want or i in want)]
+    candidates = []
+    for i in lb_ids:
+        for g in run_groups(i, cfg):
+            if texts:
+                hay = " ".join([g["run"], g["sample"], g["info"], " ".join(g["files"]),
+                                " ".join((e["subject"] or "") + " " + e["text"] for e in g["entries"]),
+                                " ".join(f"{k}={v}" for k, v in g["params"].items())]).lower()
+                if not all(t in hay or (t.isdigit() and str(int(t)) == g["run"]) for t in texts):
+                    continue
+            candidates.append(g)
+    candidates.sort(key=lambda g: -g["first"])
     out = []
-    for r in rows:
-        params = db.jl(r["params_json"], {})
-        rel = [ids_of[n] for n in (ctx.related(r["logbook"]) if ctx else []) if ids_of.get(n) in allowed]
-        need = conds or len(out) < 100
-        cond = run_conditions([r["logbook_id"]] + rel, names, _run_start(r)) if need else {}
+    for g in candidates:
+        rel = [ids_of[n] for n in (ctx.related(g["logbook"]) if ctx else []) if ids_of.get(n) in allowed]
+        need = conds or (with_conditions and len(out) < 100)
+        cond = run_conditions([ids_of[g["logbook"]]] + rel, names, _run_start_ts(g)) if need else {}
         if conds:
-            values = {norm(k): number(v) for k, v in params.items()}
+            values = {norm(k): number(v) for k, v in g["params"].items()}
             values.update({norm(k): c["value"] for k, c in cond.items()})
-            ok = True
-            for name, op, val in conds:
-                hits = [v for k, v in values.items() if v is not None and (k == name or k.endswith(name))]
-                if not hits or not any(OPS[op](h, val) for h in hits):
-                    ok = False
-                    break
-            if not ok:
+            if not all(any(OPS[op](v, val) for k, v in values.items() if v is not None and (k == name or k.endswith(name)))
+                       for name, op, val in conds):
                 continue
-        out.append({"logbook": r["logbook"], "mid": r["mid"], "time": r["time"], "name": r["name"],
-                    "sample": r["sample"], "info": r["info"], "experiment": r["experiment"], "start": r["start"],
-                    "end": r["end"], "interrupted": bool(r["interrupted"]), "params": params, "conditions": cond})
+        first = g["entries"][0]
+        out.append({**{k: g[k] for k in ("logbook", "run", "source", "sample", "info", "start", "end", "status",
+                                          "files", "params", "first", "last", "duration_h")},
+                    "name": g["run"], "mid": first["mid"], "time": g["first"], "interrupted": g["status"] == "interrupted",
+                    "entries": [{k: e[k] for k in ("mid", "time", "author", "subject", "summary", "kind")} for e in g["entries"]],
+                    "conditions": cond})
         if len(out) >= limit:
             break
     return out

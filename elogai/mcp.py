@@ -40,9 +40,12 @@ TOOLS = [
     {"name": "item_history", "description": "Exact history of a sample, tip or serial number (positions, time on the "
                                             "measuring stage) from change notes and attributes.",
      "inputSchema": {"type": "object", "properties": {"item": {"type": "string"}}, "required": ["item"]}},
-    {"name": "runs", "description": "DAQ runs. Query: words and conditions separated by commas, "
-                                    "e.g. 'TaS2, Legend OUT > 2.5'.",
-     "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}},
+    {"name": "runs", "description": "Measurement runs, each with all its entries (start, notes, end). Query: words "
+                                    "and conditions separated by commas, e.g. 'TaS2, Legend OUT > 2.5'; optionally "
+                                    "only in some logbooks.",
+     "inputSchema": {"type": "object", "properties": {"query": {"type": "string"},
+                                                      "logbooks": {"type": "array", "items": {"type": "string"}}},
+                     "required": ["query"]}},
 ]
 
 
@@ -143,7 +146,10 @@ def call(name: str, a: dict, user, ai, ix) -> str:
         return insights.lifecycle_text(lc) if lc["periods"] else \
             f"{lc['entries']} entries name {lc['value']}; no recorded changes of position or state."
     if name == "runs":
-        return json.dumps([{k: r[k] for k in ("logbook", "mid", "name", "sample", "info", "start", "end",
-                                              "interrupted", "conditions")}
-                           for r in insights.runs(allowed, a.get("query", ""), 50, ctx=ai.ctx)], ensure_ascii=False, indent=1)
+        return json.dumps([{**{k: r[k] for k in ("logbook", "run", "sample", "info", "status", "duration_h", "files",
+                                                 "conditions")},
+                            "from": datetime.fromtimestamp(r["first"]).isoformat(timespec="minutes"),
+                            "entries": [f"[{r['logbook']} #{e['mid']}] {e['subject'] or ''}" for e in r["entries"]]}
+                           for r in insights.runs(allowed, a.get("query", ""), 50, ctx=ai.ctx, logbooks=lbs, cfg=ix.cfg)],
+                          ensure_ascii=False, indent=1)
     raise LookupError(f"unknown tool {name}")

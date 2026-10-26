@@ -465,7 +465,10 @@ def create_app(conf: dict, start_worker: bool = True) -> Flask:
 
     @app.get("/api/insights/runs")
     def ins_runs():
-        return jsonify(insights.runs(allowed(), request.args.get("q", ""), ctx=ai.ctx))
+        lbs = scope_args(request.args)["logbooks"]
+        if request.args.get("logbooks") and not lbs:
+            return jsonify([])               # only logbooks the user cannot read were asked for
+        return jsonify(insights.runs(allowed(), request.args.get("q", ""), ctx=ai.ctx, cfg=ix.cfg, logbooks=lbs))
 
     @app.get("/api/insights/activity")
     def ins_activity():
