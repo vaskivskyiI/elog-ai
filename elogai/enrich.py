@@ -92,7 +92,9 @@ def pending_enrich(ai: AI, conf: dict, limit: int) -> list:
         args.append(int(datetime.strptime(conf["enrich_since"], "%Y-%m-%d").timestamp()))
     return db.all(f"""SELECT {ENTRY_COLS} FROM entries e JOIN logbooks l ON l.id = e.logbook_id
                       LEFT JOIN enrich x ON x.entry_id = e.id
-                      WHERE l.active = 1 AND (x.entry_id IS NULL OR x.hash != e.hash) {where}
+                      LEFT JOIN logbook_ctx v ON v.logbook_id = e.logbook_id
+                      WHERE l.active = 1 AND (x.entry_id IS NULL OR x.hash != e.hash
+                                              OR coalesce(x.ctx, '') != coalesce(v.h, '')) {where}
                       ORDER BY e.priority DESC, e.time DESC LIMIT ?""", *args, limit)
 
 
@@ -139,11 +141,16 @@ def enrich_batch(ai: AI, ix: Indexer, rows) -> int:
     return done
 
 
+def _notes(ai: AI, logbook: str) -> str:
+    ctx = getattr(ai, "ctx", None)
+    return ctx.enrich_notes(logbook) if ctx else ""
+
+
 def _enrich_group(ai: AI, group) -> int:
     ids = {r["id"]: r for r, _ in group}
     try:
         out = ai.fast.chat([{"role": "user", "content": prompts.enrich_user([(r["id"], d) for r, d in group])}],
-                           system=prompts.enrich_system(), json_mode=True, max_tokens=700 * len(group) + 300,
+                           system=prompts.enrich_system(_notes(ai, group[0][0]["logbook"])), json_mode=True, max_tokens=700 * len(group) + 300,
                            temperature=0.1, task="enrich")
         data = providers.parse_json(out)
         items = data.get("items", data if isinstance(data, list) else [data]) if isinstance(data, (dict, list)) else []
@@ -218,12 +225,14 @@ def _store(r, it: dict | None, model: str, error: str = "") -> None:
     x = _clean(it) if it else {"summary": "", "kind": "", "tags": [], "entities": [], "measurements": [],
                                  "problem": None, "lang": "", "english": ""}
     with db.tx() as c:
+        ctx = c.execute("SELECT h FROM logbook_ctx WHERE logbook_id = ?", (r["logbook_id"],)).fetchone()
         c.execute("""INSERT OR REPLACE INTO enrich (entry_id, hash, model, at, summary, kind, tags_json, entities_json,
-                       measurements_json, problem_json, lang, english, error) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       measurements_json, problem_json, lang, english, error, ctx)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                   (r["id"], r["hash"], model, db.now(), x["summary"], x["kind"], json.dumps(x["tags"]),
                    json.dumps(x["entities"], ensure_ascii=False), json.dumps(x["measurements"], ensure_ascii=False),
                    json.dumps(x["problem"], ensure_ascii=False) if x["problem"] else None, x["lang"], x["english"],
-                   error or None))
+                   error or None, ctx[0] if ctx else None))
         c.execute("DELETE FROM entities WHERE entry_id = ? AND source = 'ai'", (r["id"],))
         for e in x["entities"]:
             c.execute("INSERT INTO entities (entry_id, type, value, norm, source) VALUES (?, ?, ?, ?, 'ai')",

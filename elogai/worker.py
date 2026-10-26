@@ -6,7 +6,7 @@ import logging
 import threading
 import time
 
-from . import db, digest, enrich, providers
+from . import alerts, db, digest, enrich, providers
 from .ai import AI
 from .indexer import Indexer
 
@@ -42,6 +42,11 @@ class Worker:
         while not self.stop.is_set():
             try:
                 st = self.ix.scan()
+                if getattr(self.ai, "ctx", None):
+                    self.ai.ctx.refresh()      # elogd.cfg may have new AI context / AI related
+                if time.time() - self.state.get("alerts_at", 0) > 1800:   # no model calls: cheap
+                    self.state["alerts_at"] = time.time()
+                    alerts.check(self.ix)
                 self.state["scan"] = st
                 self.state["last_scan"] = db.now()
                 if st["added"] or st["updated"] or st["deleted"]:

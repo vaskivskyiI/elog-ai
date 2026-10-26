@@ -59,6 +59,8 @@ class Auth:
         auth = headers.get("Authorization", "")
         if self.token and auth.startswith("Bearer ") and hmac.compare_digest(auth[7:].strip(), self.token):
             return User("api", "API", "api", True, self.all_logbooks())
+        if auth.startswith("Bearer eai_"):
+            return self.by_token(auth[7:].strip())
         sid = cookies.get("sid", "")
         if not re.fullmatch(r"[A-Za-z0-9]{0,64}", sid):
             return None
@@ -129,6 +131,66 @@ class Auth:
                      or not has_passwords)
         key = login or name or "guest-" + hashlib.sha256(f"{sid}|{fwd}".encode()).hexdigest()[:12]
         return User(key, name or "Guest", login, admin, allowed)
+
+    # ---- personal tokens (MCP and scripts) ----------------------------------------------------
+
+    def by_token(self, token: str) -> User | None:
+        """A personal token acts as its owner. There is no ELOG session to ask elogd about, so the
+        readable logbooks follow elogd.cfg with elogd's rules (see readable_by)."""
+        h = hashlib.sha256(token.encode()).hexdigest()
+        row = db.get("SELECT * FROM tokens WHERE hash = ?", h)
+        if not row:
+            return None
+        ck = "token|" + h
+        with self.lock:
+            hit = self.cache.get(ck)
+        if hit and time.time() - hit[0] < TTL:
+            return hit[1]
+        login = row["login"] or ""
+        users = self._accounts()
+        acc = users.get(login.lower()) if login else None
+        has_passwords = bool(self.ix.cfg and self.ix.cfg.get_global("Password file"))
+        if has_passwords and (acc is None or acc["inactive"]):
+            user = None                       # account deleted or deactivated: the token stops working
+        else:
+            allowed = {i for n, i in self.ix.logbooks.items() if self.readable_by(n, login)}
+            admins = {a.lower() for a in (self.ix.cfg.admins() if self.ix.cfg else [])} | self.extra_admins
+            user = User(row["user"], (acc or {}).get("full_name") or login, login, login.lower() in admins, allowed)
+        db.run("UPDATE tokens SET last_used = ? WHERE id = ?", db.now(), row["id"])
+        with self.lock:
+            self.cache[ck] = (time.time(), user)
+        return user
+
+    def readable_by(self, lb: str, login: str) -> bool:
+        """elogd's rule (logbook_readable in the F7 fork): no password file, guest access, or an
+        account listed in "Login user" / "Admin user" (no "Login user" list: every account)."""
+        cfg = self.ix.cfg
+        if not cfg.get(lb, "Password file") or cfg.get(lb, "Guest menu commands"):
+            return True
+        if not login:
+            return False
+        lst = [x.strip() for x in cfg.get(lb, "Login user").split(",") if x.strip()]
+        adm = [x.strip() for x in cfg.get(lb, "Admin user").split(",") if x.strip()]
+        return not lst or login in lst or login in adm
+
+    def _accounts(self) -> dict:
+        cfg = self.ix.cfg
+        path = cfg.get_global("Password file") if cfg else ""
+        if not path:
+            return {}
+        if not os.path.isabs(path):
+            path = os.path.join(os.path.dirname(self.ix.cfg_path), path)
+        try:
+            with open(path, "rb") as f:
+                xml = f.read().decode("utf-8", "replace")
+        except OSError:
+            return {}
+        out = {}
+        for u in re.findall(r"<user>(.*?)</user>", xml, re.S):
+            tag = lambda t: (re.search(f"<{t}>(.*?)</{t}>", u, re.S) or [None, ""])[1].strip()
+            if tag("name"):
+                out[tag("name").lower()] = {"full_name": tag("full_name"), "inactive": tag("inactive") == "1"}
+        return out
 
     def _login_of(self, full_name: str) -> str:
         """elogd reports the full name; the password file maps it to the login (if unique)."""

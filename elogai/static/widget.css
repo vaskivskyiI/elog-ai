@@ -81,3 +81,11 @@ a.eai-chip:hover { background: var(--eai-accent-soft); }
 .eai-assist-out:empty { display: none; }
 .eai-sugg, .eai-polish { background: var(--eai-surface-2); border: 1px solid var(--eai-border); border-radius: 6px; padding: 8px 10px; display: flex; flex-direction: column; gap: 4px; }
 .eai-polish { white-space: pre-wrap; max-height: 260px; overflow: auto; }
+
+/* wide screens: the panel sits next to the page instead of covering it, so an opened source is visible */
+@media (min-width: 1200px) {
+  html.eai-docked body { margin-right: min(440px, 34vw); }
+  .eai-drawer { width: min(440px, 34vw); }
+}
+.eai-srcs a.eai-here { font-weight: 600; text-decoration: underline; }
+.eai-a .eai-cite { margin: 0 1px; }

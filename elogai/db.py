@@ -68,6 +68,26 @@ MIGRATIONS = [
       tokens_out INTEGER, ms INTEGER, ok INTEGER);
     CREATE INDEX usage_at ON usage (at);
     """,
+    # per-logbook AI notes (elogd.cfg "AI context"/"AI related"): an analysis made with other notes is redone
+    """
+    CREATE TABLE logbook_ctx (logbook_id INTEGER PRIMARY KEY, h TEXT);
+    ALTER TABLE enrich ADD COLUMN ctx TEXT;
+    """,
+    # alerts, mailed digests, notes from feedback, personal tokens (MCP)
+    """
+    CREATE TABLE alerts (
+      id INTEGER PRIMARY KEY, key TEXT NOT NULL UNIQUE, logbook_id INTEGER NOT NULL, kind TEXT, text TEXT,
+      mid INTEGER, at INTEGER, sent_to TEXT);
+    CREATE INDEX alerts_at ON alerts (at);
+    ALTER TABLE digests ADD COLUMN mailed INTEGER;
+    ALTER TABLE messages ADD COLUMN comment TEXT;
+    CREATE TABLE notes (
+      id INTEGER PRIMARY KEY, logbook_id INTEGER NOT NULL, text TEXT NOT NULL, created_by TEXT, at INTEGER,
+      message_id INTEGER);
+    CREATE TABLE tokens (
+      id INTEGER PRIMARY KEY, user TEXT NOT NULL, login TEXT, name TEXT, hash TEXT NOT NULL UNIQUE,
+      created INTEGER, last_used INTEGER);
+    """,
 ]
 
 _local = threading.local()

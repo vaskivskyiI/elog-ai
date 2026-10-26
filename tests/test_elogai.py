@@ -30,11 +30,14 @@ Group Lasers = Laser, Secret
 [Laser]
 Attributes = Author, Category, Power, T, Sample, Subject
 Options Category = Info, Problem, Fix, Routine entry
+AI context = Moving the laser table between rooms is routine; what matters is output power.
+AI related = Sec*
 
 [Secret]
 Subdir = secret-data
 Attributes = Author, Subject
 Login user = alice
+AI context = notes/secret-ai.txt
 """
 
 PWD = """<?xml version="1.0" encoding="ISO-8859-1"?>
@@ -63,6 +66,9 @@ def write_site(root):
     os.makedirs(os.path.join(root, "logbooks", "secret-data", "2026"), exist_ok=True)
     with open(os.path.join(root, "elogd.cfg"), "w") as f:
         f.write(CFG)
+    os.makedirs(os.path.join(root, "logbooks", "notes"), exist_ok=True)
+    with open(os.path.join(root, "logbooks", "notes", "secret-ai.txt"), "w") as f:
+        f.write("Pump replacements are the important events here.")
     with open(os.path.join(root, "passwords.pwd"), "w") as f:
         f.write(PWD)
     laser = (
@@ -403,3 +409,12 @@ def test_embedding_prefixes():
     q, d = prefixes("qwen3-embedding:4b")
     assert q.startswith("Instruct: ") and q.endswith("Query: ") and d == ""
     assert prefixes("bge-m3") == ("", "")
+
+
+def test_run_conditions(app):
+    allowed = set(app.extensions["elogai"]["ix"].logbooks.values())
+    from elogai import insights
+    assert [r["name"] for r in insights.runs(allowed, "S-179, DelayLine.position > 10")] == ["905"]
+    assert insights.runs(allowed, "DelayLine.position > 20") == []
+    r = insights.runs(allowed, "905")[0]
+    assert r["conditions"]["Laser Power"]["value"] == 2.85        # reading of its own logbook at run start

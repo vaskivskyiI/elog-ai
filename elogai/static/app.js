@@ -213,6 +213,34 @@
     var probs = h('div', { class: 'card' }, h('b', null, 'Open problems'), loading());
     top.appendChild(act); top.appendChild(probs);
     main.appendChild(top);
+    var al = h('div');
+    main.appendChild(al);
+    api('alerts').then(function (rows) {
+      if (!rows.length) return;
+      al.appendChild(h('h2', null, 'Alerts'));
+      al.appendChild(h('div', { class: 'card' }, rows.slice(0, 12).map(function (a) {
+        return h('div', { style: 'margin:3px 0' }, h('span', { class: 'chip ' + (a.kind === 'problem' ? 'problem' : 'warn') }, a.kind),
+          ' ', h('span', { html: md(a.text).replace(/^<p>|<\/p>$/g, '') }), ' ', h('span', { class: 'muted small' }, ago(a.at)));
+      })));
+    });
+    if ((ME.handovers || []).length) {
+      var ho = h('div', { class: 'grid digest' });
+      main.appendChild(h('h2', null, 'Handover'));
+      main.appendChild(ho);
+      api('handovers').then(function (rows) {
+        rows.forEach(function (r) {
+          var body = h('div', { class: 'md', html: r.text ? md(r.text) : '<span class="muted">Not written yet today.</span>' });
+          var btn = h('button', { class: 'btn small' }, r.text ? 'Refresh' : 'Write now');
+          btn.onclick = function () {
+            btn.disabled = true; body.innerHTML = '<span class="spin"></span>';
+            api('handover', { logbook: r.logbook }).then(function (d) { body.innerHTML = md(d.text || 'Nothing to report.'); })
+              .catch(function (e) { body.innerHTML = ''; body.appendChild(fail(e)); }).then(function () { btn.disabled = false; });
+          };
+          ho.appendChild(h('div', { class: 'card' }, h('div', { class: 'row' }, h('b', null, r.logbook),
+            h('span', { class: 'muted small' }, r.day || ''), h('span', { class: 'spacer' }), ME.features.chat ? btn : null), body));
+        });
+      });
+    }
     var wk = h('div');
     main.appendChild(h('h2', null, 'This week'));
     main.appendChild(wk);
@@ -316,7 +344,11 @@
       var up = h('button', { title: 'Good answer', class: m.feedback === 1 ? 'on' : '' }, '👍');
       var down = h('button', { title: 'Bad answer', class: m.feedback === -1 ? 'on' : '' }, '👎');
       var copy = h('button', { title: 'Copy' }, 'Copy');
-      function fb(v) { api('messages/' + m.id + '/feedback', { value: v }); up.classList.toggle('on', v === 1); down.classList.toggle('on', v === -1); }
+      function fb(v) {
+        var comment = v === -1 ? (prompt('What was wrong or missing? (optional; logbook admins see it and can turn it into a note for the AI)') || '') : '';
+        api('messages/' + m.id + '/feedback', { value: v, comment: comment });
+        up.classList.toggle('on', v === 1); down.classList.toggle('on', v === -1);
+      }
       up.onclick = function () { fb(1); }; down.onclick = function () { fb(-1); };
       copy.onclick = function () { navigator.clipboard && navigator.clipboard.writeText(m.content); copy.textContent = 'Copied'; };
       return h('div', { class: 'tools' }, up, down, copy);
@@ -634,12 +666,14 @@
     }
     function show(it) {
       detail.innerHTML = ''; detail.appendChild(loading());
-      api('insights/entity?' + qs({ value: it.value })).then(function (d) {
+      Promise.all([api('insights/entity?' + qs({ value: it.value })), api('insights/lifecycle?' + qs({ value: it.value }))]).then(function (x) {
+        var d = x[0], lc = x[1];
         detail.innerHTML = '';
         detail.appendChild(h('div', { class: 'row', style: 'margin-bottom:8px' }, h('h2', { style: 'margin:0' }, it.value), h('span', { class: 'muted' }, d.entries.length + ' entries'),
           h('span', { class: 'spacer' }),
           h('a', { class: 'btn small', href: '#ask?' + qs({}) , onclick: function (e) { e.preventDefault(); location.hash = '#ask'; setTimeout(function () { var t = document.querySelector('.composer textarea'); if (t) { t.value = 'Give me the history of ' + it.value + ': where it was used, measured, moved, and any problems.'; t.focus(); } }, 50); } }, 'Ask about it'),
           h('a', { class: 'btn small', href: '#search?' + qs({ entity: it.value }) }, 'Search')));
+        detail.appendChild(lifecycleView(lc));
         detail.appendChild(h('div', { class: 'results' }, d.entries.map(function (r) { return resultCard(r); })));
       });
     }
@@ -647,14 +681,39 @@
     if (p.value) show({ value: p.value });
   };
 
+  // history of an item from change notes and attributes: current state, time per value, periods
+  function lifecycleView(lc) {
+    var keys = Object.keys(lc.periods || {});
+    if (!keys.length) return h('div');
+    var box = h('div', { class: 'card', style: 'margin-bottom:12px' });
+    box.appendChild(h('div', { class: 'row' }, h('b', null, 'History'), h('span', { class: 'muted small' }, 'from change notes and attributes of ' + lc.entries + ' entries')));
+    box.appendChild(h('div', { class: 'tags', style: 'margin:6px 0' }, keys.map(function (k) {
+      var c = lc.current[k];
+      return h('a', { class: 'chip kind', href: entryUrl(c.logbook, c.mid), target: '_blank' }, k + ': ' + c.value + ' since ' + fmtDate(c.since));
+    })));
+    keys.forEach(function (k) {
+      var tot = lc.totals[k] || {};
+      box.appendChild(h('div', { class: 'small', style: 'margin-top:8px' }, h('b', null, k), ' · total: ',
+        Object.keys(tot).map(function (v) { return v + ' ' + tot[v] + ' d'; }).join(', ')));
+      box.appendChild(h('table', { class: 't small', style: 'margin-top:4px' },
+        h('tr', null, h('th', null, k), h('th', null, 'From'), h('th', null, 'To'), h('th', null, 'Days'), h('th', null, 'Entry')),
+        lc.periods[k].slice().reverse().slice(0, 40).map(function (p) {
+          return h('tr', null, h('td', null, p.value), h('td', { class: 'muted' }, fmtDate(p.from, true)),
+            h('td', { class: 'muted' }, p.to ? fmtDate(p.to, true) : 'now'), h('td', null, p.days),
+            h('td', null, h('a', { href: entryUrl(p.logbook, p.mid), target: '_blank' }, '#' + p.mid)));
+        })));
+    });
+    return box;
+  }
+
   // ---- runs ------------------------------------------------------------------------------------
 
   routes.runs = function (p) {
     var q = p.q || '';
-    var input = h('input', { type: 'search', value: q, placeholder: 'Sample, run number, info text or parameter …', style: 'min-width:320px' });
+    var input = h('input', { type: 'search', value: q, placeholder: 'TaS2, Legend OUT > 2.5, pump_ND.currentposition >= 10 …', style: 'min-width:420px' });
     var out = h('div');
     main.appendChild(h('h1', null, 'Runs'));
-    main.appendChild(h('p', { class: 'sub' }, 'Data acquisition runs, read from the run description (.ini) attached to DAQ entries.'));
+    main.appendChild(h('p', { class: 'sub' }, 'Data acquisition runs, read from the run description (.ini) attached to DAQ entries, with the conditions at run start (last readings of the logbook and its related logbooks). Search: words, and conditions on parameters or readings separated by commas, e.g. "TaS2, Legend OUT > 2.5".'));
     main.appendChild(h('div', { class: 'row', style: 'margin-bottom:12px' }, input));
     main.appendChild(out);
     var timer;
@@ -673,11 +732,111 @@
             h('td', null, h('a', { href: entryUrl(r.logbook, r.mid), target: '_blank', onclick: function (e) { e.stopPropagation(); } }, h('b', null, r.name))),
             h('td', { class: 'muted' }, r.logbook), h('td', null, r.sample), h('td', null, r.info),
             h('td', { class: 'muted small' }, r.start), h('td', { class: 'muted small' }, r.end),
-            h('td', null, r.interrupted ? h('span', { class: 'chip warn' }, 'interrupted') : null)));
+            h('td', null, r.interrupted ? h('span', { class: 'chip warn' }, 'interrupted') : null,
+              Object.keys(r.conditions || {}).slice(0, 6).map(function (k) {
+                var c = r.conditions[k];
+                return h('span', { class: 'chip', title: 'last noted ' + fmtDate(c.time, true) + ' (' + c.logbook + ' #' + c.mid + ')' }, k + ' ' + c.raw);
+              }))));
           tb.appendChild(det);
         });
         out.appendChild(tb);
       }).catch(function (e) { out.innerHTML = ''; out.appendChild(fail(e)); });
+    }
+    load();
+  };
+
+  // ---- feedback & notes (logbook admins) -------------------------------------------------------
+
+  routes.notes = function () {
+    main.appendChild(h('h1', null, 'Feedback & notes'));
+    main.appendChild(h('p', { class: 'sub' }, 'Notes tell the AI how to read a logbook: what matters, what is routine, what abbreviations mean. ' +
+      'They are added to the logbook\'s "AI context" from elogd.cfg. Answers rated bad are listed below; "Suggest a note" drafts one from the answer and the comment. ' +
+      'After a change the logbook is analysed again in the background.'));
+    var notesBox = h('div'), fbBox = h('div');
+    main.appendChild(h('h2', null, 'Notes'));
+    main.appendChild(notesBox);
+    main.appendChild(h('h2', null, 'Answers rated bad'));
+    main.appendChild(fbBox);
+    var lbSel = h('select');
+    var text = h('textarea', { rows: 2, style: 'flex:1;min-width:300px', placeholder: 'e.g. Moving a sample between carousel positions is routine; moves to MP (measuring stage) matter.' });
+    function loadNotes() {
+      notesBox.innerHTML = ''; notesBox.appendChild(loading());
+      api('admin/notes').then(function (d) {
+        notesBox.innerHTML = '';
+        lbSel.innerHTML = '';
+        d.logbooks.forEach(function (n) { lbSel.appendChild(h('option', { value: n }, n)); });
+        notesBox.appendChild(h('div', { class: 'row', style: 'margin-bottom:10px; align-items:flex-start' }, lbSel, text,
+          h('button', { class: 'btn primary', onclick: function () {
+            if (!text.value.trim()) return;
+            api('admin/notes', { logbook: lbSel.value, text: text.value.trim() }).then(function () { text.value = ''; loadNotes(); }).catch(function (e) { alert(e.message); });
+          } }, 'Add note')));
+        var cfgd = Object.keys(d.config).filter(function (n) { return d.config[n]; });
+        if (!d.notes.length && !cfgd.length) notesBox.appendChild(h('div', { class: 'muted' }, 'No notes yet.'));
+        if (d.notes.length || cfgd.length) notesBox.appendChild(h('table', { class: 't' }, h('tr', null, h('th', null, 'Logbook'), h('th', null, 'Note'), h('th', null, 'From'), h('th', null, '')),
+          cfgd.map(function (n) { return h('tr', null, h('td', null, n), h('td', null, d.config[n]), h('td', { class: 'muted small' }, 'elogd.cfg'), h('td')); }),
+          d.notes.map(function (n) {
+            return h('tr', null, h('td', null, n.logbook), h('td', null, n.text), h('td', { class: 'muted small' }, n.by + ', ' + fmtDate(n.at)),
+              h('td', null, h('button', { class: 'btn small', onclick: function () { if (confirm('Delete this note?')) api('admin/notes/' + n.id, undefined, 'DELETE').then(loadNotes); } }, 'Delete')));
+          })));
+      }).catch(function (e) { notesBox.innerHTML = ''; notesBox.appendChild(fail(e)); });
+    }
+    api('admin/feedback').then(function (rows) {
+      if (!rows.length) { fbBox.appendChild(h('div', { class: 'muted' }, 'No answers rated bad.')); return; }
+      rows.forEach(function (r) {
+        var out = h('div');
+        fbBox.appendChild(h('div', { class: 'res' },
+          h('div', { class: 'head' }, h('b', null, r.question), h('span', { class: 'spacer' }), h('span', { class: 'meta' }, r.user + ' · ' + fmtDate(r.at, true))),
+          r.comment ? h('div', { class: 'summary' }, '“' + r.comment + '”') : null,
+          h('details', null, h('summary', { class: 'small muted' }, 'Answer'), h('div', { class: 'md small', html: md(r.answer) })),
+          h('div', { class: 'tags' }, h('button', { class: 'btn small', onclick: function (e) {
+            e.target.disabled = true;
+            api('admin/feedback/' + r.id + '/suggest', {}).then(function (sg) {
+              out.innerHTML = '';
+              var t = h('textarea', { rows: 2, style: 'width:100%' }); t.value = sg.note;
+              var sel = h('select', null, (ME.admin_of || []).map(function (n) { return h('option', { value: n, selected: n === sg.logbook }, n); }));
+              out.appendChild(h('div', { class: 'row', style: 'margin-top:6px' }, sel, t, h('button', { class: 'btn primary', onclick: function () {
+                api('admin/notes', { logbook: sel.value, text: t.value, message_id: r.id }).then(function () { out.innerHTML = '<span class="muted">Note added.</span>'; loadNotes(); });
+              } }, 'Add')));
+            }).catch(function (x) { out.textContent = x.message; }).then(function () { e.target.disabled = false; });
+          } }, 'Suggest a note')), out));
+      });
+    }).catch(function (e) { fbBox.appendChild(fail(e)); });
+    loadNotes();
+  };
+
+  // ---- connect: personal tokens for MCP clients and scripts -----------------------------------
+
+  routes.connect = function () {
+    var base = location.origin + location.pathname.replace(/[^/]*$/, '');
+    main.appendChild(h('h1', null, 'Connect'));
+    main.appendChild(h('p', { class: 'sub' }, 'Use the logbooks from Claude Desktop, Claude Code or another assistant (MCP), or from scripts. ' +
+      'A token acts as you: it sees only the logbooks you may read, and stops working if your ELOG account is deactivated. Keep it secret.'));
+    var list = h('div'), shown = h('div');
+    var name = h('input', { type: 'text', placeholder: 'Name, e.g. Claude Desktop on my laptop', style: 'min-width:300px' });
+    main.appendChild(h('div', { class: 'row', style: 'margin-bottom:12px' }, name, h('button', { class: 'btn primary', onclick: function () {
+      api('tokens', { name: name.value || 'token' }).then(function (d) {
+        shown.innerHTML = '';
+        var cmd = 'claude mcp add --transport http elog ' + base + 'mcp --header "Authorization: Bearer ' + d.token + '"';
+        shown.appendChild(h('div', { class: 'card', style: 'margin-bottom:12px' },
+          h('b', null, 'Your new token (shown only now):'), h('pre', { class: 'small', style: 'white-space:pre-wrap;word-break:break-all' }, d.token),
+          h('div', { class: 'small' }, 'Claude Code:'), h('pre', { class: 'small', style: 'white-space:pre-wrap;word-break:break-all' }, cmd),
+          h('div', { class: 'small' }, 'Claude Desktop and other MCP clients: server URL ', h('code', null, base + 'mcp'), ', header ',
+            h('code', null, 'Authorization: Bearer <token>'), '. Tools: search, ask, get_entry, summary, item_history, runs, list_logbooks.')));
+        name.value = ''; load();
+      }).catch(function (e) { alert(e.status === 403 ? 'Log in to ELOG with your own account to create a token.' : e.message); });
+    } }, 'Create token')));
+    main.appendChild(shown);
+    main.appendChild(list);
+    function load() {
+      api('tokens').then(function (rows) {
+        list.innerHTML = '';
+        if (!rows.length) { list.appendChild(h('div', { class: 'muted' }, 'No tokens.')); return; }
+        list.appendChild(h('table', { class: 't' }, h('tr', null, h('th', null, 'Name'), h('th', null, 'Created'), h('th', null, 'Last used'), h('th', null, '')),
+          rows.map(function (t) {
+            return h('tr', null, h('td', null, t.name), h('td', { class: 'muted' }, fmtDate(t.created)), h('td', { class: 'muted' }, t.last_used ? ago(t.last_used) : 'never'),
+              h('td', null, h('button', { class: 'btn small', onclick: function () { if (confirm('Revoke this token?')) api('tokens/' + t.id, undefined, 'DELETE').then(load); } }, 'Revoke')));
+          })));
+      });
     }
     load();
   };
@@ -737,6 +896,7 @@
     ME = me;
     document.getElementById('who').textContent = me.user + (me.admin ? ' · admin' : '');
     document.getElementById('nav-status').classList.toggle('hidden', !me.admin);
+    document.getElementById('nav-notes').classList.toggle('hidden', !(me.admin_of || []).length);
     document.getElementById('elog-link').href = ELOG;
     window.addEventListener('hashchange', route);
     route();

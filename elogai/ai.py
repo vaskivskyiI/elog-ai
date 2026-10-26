@@ -74,6 +74,7 @@ class AI:
         self.gate = Gate()
         self.language = conf["language"]
         self.health: dict = {}
+        self.ctx = None          # context.Contexts, set by the app
 
     @property
     def chat_enabled(self) -> bool:

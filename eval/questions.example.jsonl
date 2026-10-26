@@ -1,0 +1,8 @@
+{"question": "How was the Legend laser realigned in June 2022 and why?", "expect": ["Legend #1"], "keywords": ["stretcher", "compressor"]}
+{"question": "What fluence was used with Legend compared to Pharos for TaS2?", "expect": ["4d003 #1359"], "keywords": ["mJ/cm2"]}
+{"question": "When was the Carbide laser installed and were there problems?", "expect": ["Carbide C010 #1"], "keywords": ["chiller"]}
+{"question": "What was the transmission of the N2 MIKS compressor after fixing the misalignment?", "expect": ["N2 MIKS-1L #71"], "keywords": ["94"]}
+{"question": "Why did the TaS2 spectrum change after the measurement in April 2024?", "expect": ["4d000 #337"], "keywords": ["spot"]}
+{"question": "What were the controller parameters for the HHG spectrum with the f=150 mm lens?", "expect": ["4dmag #473"], "keywords": ["RUN717"]}
+{"question": "How small was the beam on the target after aligning the short-pass setup?", "expect": ["NP-Optics #7"], "keywords": ["125"]}
+{"question": "How long was sample S-179 on the measuring stage in total?", "expect": [], "keywords": ["39"]}

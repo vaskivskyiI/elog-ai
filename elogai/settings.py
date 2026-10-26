@@ -112,6 +112,7 @@ def from_env() -> dict:
         "enrich": (env.get("AI_ENRICH") or "all").lower(),
         "enrich_since": env.get("AI_ENRICH_SINCE") or "",
         "enrich_batch": max(1, int(env.get("AI_ENRICH_BATCH") or 4)),
+        "rerank": env.get("AI_RERANK") or "llm",
         "private_logbooks": _list(env.get("AI_PRIVATE_LOGBOOKS")),
         "language": env.get("AI_LANGUAGE") or "English",
         "timeout": float(env.get("AI_TIMEOUT") or 300),

@@ -14,8 +14,8 @@
   var AI = me ? me.src.replace(/widget\.js(\?.*)?$/, '') : '/ai/';
   var AIPATH = new URL(AI, location.href).pathname;            // e.g. /ai/
   var ROOT = AIPATH.replace(/ai\/$/, '') || '/';              // ELOG's root
-  var rel = location.pathname.indexOf(ROOT) === 0 ? location.pathname.slice(ROOT.length) : location.pathname.slice(1);
-  var parts = rel.split('/');
+  var relPath = location.pathname.indexOf(ROOT) === 0 ? location.pathname.slice(ROOT.length) : location.pathname.slice(1);
+  var parts = relPath.split('/');
   var LOGBOOK = parts[0] ? decodeURIComponent(parts[0]) : '';
   var MID = /^\d+$/.test(parts[1] || '') ? +parts[1] : 0;
   if (!LOGBOOK) return;
@@ -87,6 +87,15 @@
     var d = new Date(t * 1000), p = function (n) { return (n < 10 ? '0' : '') + n; };
     return p(d.getDate()) + '.' + p(d.getMonth() + 1) + '.' + d.getFullYear();
   }
+  // how long before or after the entry `ref` something happened: "3 d before", "2 h after"
+  function ago(t, ref) {
+    if (!ref) return fmt(t);
+    var s = t - ref, a = Math.abs(s), w = s < 0 ? ' before' : ' after';
+    if (a < 3600) return 'same hour';
+    if (a < 86400) return Math.round(a / 3600) + ' h' + w;
+    if (a < 86400 * 60) return Math.round(a / 86400) + ' d' + w;
+    return fmt(t);
+  }
   function css() {
     if ($('link[data-eai]')) return;
     document.head.appendChild(h('link', { rel: 'stylesheet', href: AI + 'widget.css', 'data-eai': '1' }));
@@ -98,27 +107,80 @@
 
   // ---- ask drawer (all logbook pages) ----------------------------------------------------------
 
-  var drawer = null, conv = null;
+  // The panel keeps its conversation across ELOG pages: clicking a source opens the entry and the
+  // same chat comes back next to it (state per browser tab, conversation from the server).
+  var drawer = null, conv = null, msgsEl = null;
+  function dstate(upd) {
+    var st = {};
+    try { st = JSON.parse(sessionStorage.getItem('eai-drawer') || '{}'); } catch (e) {}
+    if (upd) {
+      for (var k in upd) st[k] = upd[k];
+      try { sessionStorage.setItem('eai-drawer', JSON.stringify(st)); } catch (e) {}
+    }
+    return st;
+  }
   function openDrawer(prefill) {
     if (!drawer) buildDrawer();
     drawer.classList.add('eai-open');
+    document.documentElement.classList.add('eai-docked');
+    dstate({ open: true });
     var ta = $('textarea', drawer);
     if (prefill) ta.value = prefill;
     ta.focus();
   }
+  function closeDrawer() {
+    if (!drawer) return;
+    drawer.classList.remove('eai-open');
+    document.documentElement.classList.remove('eai-docked');
+    dstate({ open: false });
+  }
+  function sourceLinks(srcs) {
+    return h('div', { class: 'eai-srcs' }, (srcs || []).slice(0, 10).map(function (s) {
+      var here = s.logbook.toLowerCase() === LOGBOOK.toLowerCase() && s.mid === MID;
+      return h('a', { href: entryUrl(s.logbook, s.mid), class: here ? 'eai-here' : null,
+                      title: (here ? 'This entry. ' : '') + (s.summary || '') },
+        (s.related ? '↔ ' : '') + s.logbook + ' #' + s.mid + (s.subject ? ' · ' + s.subject : ''));
+    }));
+  }
+  function hint() {
+    return h('div', { class: 'eai-hint' }, 'Ask about ', h('b', null, LOGBOOK), ' or all your logbooks. Answers cite the entries they use; ' +
+      'the conversation stays here while you open them.');
+  }
+  function restore(id) {
+    api('conversations/' + id).then(function (c) {
+      conv = c.id;
+      msgsEl.innerHTML = '';
+      c.messages.forEach(function (m) {
+        if (m.role === 'user') msgsEl.appendChild(h('div', { class: 'eai-q' }, m.content));
+        else {
+          var a = h('div', { class: 'eai-a', html: md(m.content) });
+          if (m.sources && m.sources.length) a.appendChild(sourceLinks(m.sources));
+          msgsEl.appendChild(a);
+        }
+      });
+      msgsEl.scrollTop = msgsEl.scrollHeight;
+    }).catch(function () { conv = null; dstate({ conv: null }); });
+  }
   function buildDrawer() {
-    var msgs = h('div', { class: 'eai-msgs' },
-      h('div', { class: 'eai-hint' }, 'Ask about ', h('b', null, LOGBOOK), ' or all your logbooks. Answers cite the entries they use.'));
-    var only = h('input', { type: 'checkbox', checked: true });
+    var st = dstate();
+    msgsEl = h('div', { class: 'eai-msgs' }, hint());
+    var msgs = msgsEl;
+    var only = h('input', { type: 'checkbox', checked: st.only !== false });
+    only.addEventListener('change', function () { dstate({ only: only.checked }); });
     var ta = h('textarea', { rows: 2, placeholder: 'e.g. When was the compressor last realigned?' });
     var send = h('button', { class: 'eai-btn eai-primary' }, 'Ask');
     drawer = h('aside', { class: 'eai-drawer', role: 'dialog', 'aria-label': 'Ask AI' },
       h('div', { class: 'eai-dhead' }, h('b', null, '✦ Ask AI'), h('span', { class: 'eai-sp' }),
-        h('a', { href: AI + '#ask', target: '_blank', title: 'Open the AI workspace' }, 'Workspace ↗'),
-        h('button', { class: 'eai-x', 'aria-label': 'Close', onclick: function () { drawer.classList.remove('eai-open'); } }, '×')),
+        h('button', { class: 'eai-link', title: 'Start a new conversation', onclick: function () {
+          conv = null; dstate({ conv: null }); msgs.innerHTML = ''; msgs.appendChild(hint()); ta.focus();
+        } }, 'New chat'),
+        h('a', { href: AI + '#ask' + (st.conv ? '?c=' + st.conv : ''), target: '_blank', title: 'Open the AI workspace',
+                 onclick: function (e) { e.currentTarget.href = AI + '#ask' + (conv ? '?c=' + conv : ''); } }, 'Workspace ↗'),
+        h('button', { class: 'eai-x', 'aria-label': 'Close', onclick: closeDrawer }, '×')),
       msgs,
       h('div', { class: 'eai-compose' }, ta, h('div', { class: 'eai-row' }, h('label', null, only, ' only ' + LOGBOOK), h('span', { class: 'eai-sp' }), send)));
     document.body.appendChild(drawer);
+    if (st.conv) restore(st.conv);
     function go() {
       var q = ta.value.trim();
       if (!q) return;
@@ -127,22 +189,21 @@
       msgs.appendChild(h('div', { class: 'eai-q' }, q));
       var a = h('div', { class: 'eai-a' }, h('span', { class: 'eai-muted' }, 'Searching…'));
       msgs.appendChild(a);
+      msgs.scrollTop = msgs.scrollHeight;
       var text = '', srcs = [];
       send.disabled = true;
       stream('ask', { question: q, conversation_id: conv, logbooks: only.checked ? [LOGBOOK] : [] }, function (ev) {
-        if (ev.type === 'conversation') conv = ev.id;
+        if (ev.type === 'conversation') { conv = ev.id; dstate({ conv: conv }); }
         else if (ev.type === 'sources') srcs = ev.sources;
         else if (ev.type === 'delta') { text += ev.text; a.innerHTML = md(text); msgs.scrollTop = msgs.scrollHeight; }
         else if (ev.type === 'error') a.appendChild(h('div', { class: 'eai-err' }, ev.error));
-        else if (ev.type === 'done' && srcs.length) a.appendChild(h('div', { class: 'eai-srcs' }, srcs.slice(0, 8).map(function (s) {
-          return h('a', { href: entryUrl(s.logbook, s.mid), title: s.summary || '' }, s.logbook + ' #' + s.mid + (s.subject ? ' · ' + s.subject : ''));
-        })));
+        else if (ev.type === 'done' && srcs.length) a.appendChild(sourceLinks(srcs));
       }).catch(function (e) { a.innerHTML = ''; a.appendChild(h('div', { class: 'eai-err' }, e.message)); })
         .then(function () { send.disabled = false; });
     }
     send.addEventListener('click', go);
     ta.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); go(); } });
-    document.addEventListener('keydown', function (e) { if (e.key === 'Escape') drawer.classList.remove('eai-open'); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && drawer.classList.contains('eai-open')) closeDrawer(); });
   }
   function askButton() {
     var b = h('button', { type: 'button', class: 'eai-ask', title: 'Ask AI about this logbook (Alt+A)', onclick: function () { openDrawer(); } }, '✦ Ask AI');
@@ -228,6 +289,24 @@
             .catch(function (x) { ts.textContent = x.message; });
         } }, 'Summarise this thread (' + d.thread.entries + ' entries)'));
         left.appendChild(ts);
+      }
+      var ar = d.around || {};
+      if ((ar.entries && ar.entries.length) || (ar.values && ar.values.length)) {
+        var lbs = (ar.entries || []).concat(ar.values || []).map(function (s) { return s.logbook; })
+          .filter(function (x, i, a) { return a.indexOf(x) === i; });
+        right.appendChild(h('div', { class: 'eai-h', title: 'Related logbooks: their last entries before this one (however old) and the day after' },
+          lbs.join(', ') + ' at that time'));
+        if (ar.values && ar.values.length) right.appendChild(h('div', { class: 'eai-chips' }, ar.values.map(function (v) {
+          return h('a', { class: 'eai-chip', href: entryUrl(v.logbook, v.mid), title: v.logbook + ' #' + v.mid + ', ' + fmt(v.time) },
+            v.name + ' ' + v.raw + ' · ' + ago(v.time, d.time));
+        })));
+        (ar.entries || []).forEach(function (s) {
+          right.appendChild(h('a', { class: 'eai-rel', href: entryUrl(s.logbook, s.mid), title: (s.summary || s.snippet || '') + ' · ' + fmt(s.time) },
+            h('span', { class: 'eai-ref' }, s.logbook + ' #' + s.mid),
+            h('span', null, s.subject || s.summary || (s.snippet || '').slice(0, 60)),
+            h('span', { class: 'eai-muted' }, ago(s.time, d.time))));
+        });
+        right.appendChild(h('div', { style: 'height:8px' }));
       }
       right.appendChild(h('div', { class: 'eai-h' }, 'Related entries'));
       if (!d.similar.length) right.appendChild(h('div', { class: 'eai-muted' }, 'None found yet.'));
@@ -368,6 +447,7 @@
       LOGBOOK = d.logbooks.filter(function (l) { return l.name.toLowerCase() === LOGBOOK.toLowerCase(); })[0].name;
       css();
       askButton();
+      if (dstate().open) openDrawer();          // came here from a link in the panel
       if (isEntry) entryPanel();
       if (isList) previewPanels();
       if (isEdit && d.features.chat) editAssist();

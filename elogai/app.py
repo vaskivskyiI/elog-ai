@@ -3,17 +3,20 @@ browser sends ELOG's session cookie with every request (see auth.py)."""
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
+import secrets
 import sys
 from datetime import date, datetime
 
 from flask import Flask, Response, abort, g, jsonify, request, send_from_directory, stream_with_context
 
-from . import assistant, db, digest, enrich, insights, prompts, providers, search, settings
+from . import alerts, assistant, db, digest, enrich, insights, mcp, prompts, providers, search, settings
 from .ai import AI, acting_user
 from .auth import Auth, logbook_ids
+from .context import Contexts
 from .indexer import Indexer
 from .worker import Worker
 
@@ -28,6 +31,8 @@ def create_app(conf: dict, start_worker: bool = True) -> Flask:
     ix = Indexer(conf["elogd_cfg"])
     ix.load_config(force=True)
     ai = AI(conf)
+    ai.ctx = Contexts(ix)
+    ai.ctx.refresh()
     auth = Auth(conf, ix)
     worker = Worker(ai, ix, conf)
     app.extensions["elogai"] = {"ai": ai, "ix": ix, "auth": auth, "worker": worker, "conf": conf}
@@ -46,6 +51,25 @@ def create_app(conf: dict, start_worker: bool = True) -> Flask:
             if request.method not in ("GET", "HEAD") and request.headers.get("X-Requested-With") != "elog-ai":
                 return jsonify({"error": "missing X-Requested-With header"}), 403
             g.user = u
+
+    @app.route("/mcp", methods=["GET", "POST", "DELETE"])
+    def mcp_endpoint():
+        auth_h = request.headers.get("Authorization", "")
+        u = auth.identify({}, {"Authorization": auth_h}) if auth_h.startswith("Bearer ") else None
+        if u is None:
+            return jsonify({"error": "Bearer token required (create one on the AI workspace's Connect page)"}), 401
+        if request.method != "POST":
+            return "", 405
+        payload = request.get_json(force=True, silent=True)
+        if payload is None:
+            return jsonify(mcp.handle({"id": None}, u, ai, ix) or {"jsonrpc": "2.0", "id": None,
+                           "error": {"code": -32700, "message": "parse error"}}), 400
+        with acting_user(u.key):
+            if isinstance(payload, list):
+                out = [r for r in (mcp.handle(m, u, ai, ix) for m in payload) if r]
+                return (jsonify(out), 200) if out else ("", 202)
+            r = mcp.handle(payload, u, ai, ix)
+        return (jsonify(r), 200) if r else ("", 202)
 
     @app.after_request
     def headers(resp):
@@ -128,6 +152,10 @@ def create_app(conf: dict, start_worker: bool = True) -> Flask:
                                       "series": db.jl(r["numeric_json"])} for r in lbs],
                         "groups": {k: v for k, v in groups.items() if v},
                         "features": {"chat": ai.chat_enabled, "embed": ai.embed_enabled, "vision": bool(ai.vision)},
+                        "admin_of": [n for n, i in ix.logbooks.items() if i in allowed() and (
+                            g.user.admin or (g.user.login and g.user.login.lower() in
+                                             [a.strip().lower() for a in ix.cfg.get(n, "Admin user").split(",")]))],
+                        "handovers": digest.handover_logbooks(ix),
                         "models": {"chat": ai.chat.model, "fast": ai.fast.model, "embed": ai.embed_model},
                         "elog_url": (ix.cfg.get_global("URL") if ix.cfg else "") or "/"})
 
@@ -166,8 +194,9 @@ def create_app(conf: dict, start_worker: bool = True) -> Flask:
                       e["logbook_id"], e["thread_root"] or e["mid"])
         with acting_user(g.user.key):
             sim = search.similar(ai, e["id"], allowed(), 6)
+        around = related_around(e)
         return jsonify({
-            "id": e["id"], "logbook": lb, "mid": e["mid"],
+            "id": e["id"], "logbook": lb, "mid": e["mid"], "time": e["time"],
             "analysis": None if not x else {
                 "fresh": fresh, "summary": x["summary"], "kind": x["kind"], "tags": db.jl(x["tags_json"]),
                 "measurements": db.jl(x["measurements_json"]), "problem": db.jl(x["problem_json"], None),
@@ -180,7 +209,22 @@ def create_app(conf: dict, start_worker: bool = True) -> Flask:
             "images": [dict(r) for r in db.all("SELECT file, description FROM attachments_ai WHERE entry_id = ? "
                                                 "AND description != ''", e["id"])],
             "thread": {"root": e["thread_root"] or e["mid"], "entries": thread_n, "summary": tdig["text"] if tdig else ""},
-            "similar": sim, "pending": not fresh and ai.chat_enabled})
+            "similar": sim, "around": around, "pending": not fresh and ai.chat_enabled})
+
+    def related_around(e) -> dict:
+        """The state of related logbooks (AI related) the user may read at the time of the entry:
+        the instrument for an experiment entry, the experiments for an instrument entry. The last
+        entries before it however old they are (conditions are often stable for days), the next day
+        after it, and the last numeric readings."""
+        lb = db.scalar("SELECT name FROM logbooks WHERE id = ?", e["logbook_id"])
+        ids = [ix.logbooks[n] for n in ai.ctx.related(lb) if ix.logbooks.get(n) in allowed()] if ai.ctx else []
+        if not ids or not e["time"]:
+            return {"entries": [], "values": []}
+        rows = sorted(search.rows_for(insights.state_around(ids, e["time"], before=3 if len(ids) < 3 else 1)),
+                      key=lambda r: r["time"])
+        names = {v: k for k, v in ix.logbooks.items()}
+        values = [{**v, "logbook": names[i]} for i in ids for v in insights.last_values(i, e["time"])]
+        return {"entries": rows[:12], "values": values[:12]}
 
     @app.post("/api/entry/analyze")
     def entry_analyze():
@@ -231,9 +275,125 @@ def create_app(conf: dict, start_worker: bool = True) -> Flask:
 
     @app.post("/api/messages/<int:mid>/feedback")
     def feedback(mid):
-        v = int(request.get_json(force=True).get("value") or 0)
-        db.run("""UPDATE messages SET feedback = ? WHERE id = ? AND conversation_id IN
-                  (SELECT id FROM conversations WHERE user = ?)""", max(-1, min(1, v)), mid, g.user.key)
+        b = request.get_json(force=True)
+        v = int(b.get("value") or 0)
+        db.run("""UPDATE messages SET feedback = ?, comment = ? WHERE id = ? AND conversation_id IN
+                  (SELECT id FROM conversations WHERE user = ?)""",
+               max(-1, min(1, v)), (b.get("comment") or "")[:2000] or None, mid, g.user.key)
+        return jsonify({"ok": True})
+
+    # ---- personal tokens (MCP, scripts) ---------------------------------------------------------
+
+    @app.get("/api/tokens")
+    def tokens_list():
+        return jsonify([{"id": r["id"], "name": r["name"], "created": r["created"], "last_used": r["last_used"]}
+                        for r in db.all("SELECT * FROM tokens WHERE user = ? ORDER BY id", g.user.key)])
+
+    @app.post("/api/tokens")
+    def tokens_create():
+        if not g.user.login or g.user.login == "api":
+            abort(403)                     # a token acts as an ELOG account: log in with yours
+        token = "eai_" + secrets.token_urlsafe(32)
+        db.run("INSERT INTO tokens (user, login, name, hash, created) VALUES (?,?,?,?,?)", g.user.key, g.user.login,
+               (request.get_json(force=True).get("name") or "token")[:80], hashlib.sha256(token.encode()).hexdigest(),
+               db.now())
+        return jsonify({"token": token})
+
+    @app.delete("/api/tokens/<int:tid>")
+    def tokens_delete(tid):
+        db.run("DELETE FROM tokens WHERE id = ? AND user = ?", tid, g.user.key)
+        auth.cache.clear()
+        return jsonify({"ok": True})
+
+    # ---- feedback loop: bad answers become notes for the logbook ---------------------------------
+
+    def can_admin(lb: str) -> bool:
+        """Global admins, and admins of the logbook (its "Admin user" list)."""
+        if g.user.admin:
+            return True
+        admins = [a.strip().lower() for a in (ix.cfg.get(lb, "Admin user") if ix.cfg else "").split(",")]
+        return bool(g.user.login) and g.user.login.lower() in admins
+
+    def admin_logbooks() -> list[str]:
+        return [n for n, i in ix.logbooks.items() if i in allowed() and can_admin(n)]
+
+    def question_of(m):
+        q = db.get("SELECT content FROM messages WHERE conversation_id = ? AND id < ? AND role = 'user' "
+                   "ORDER BY id DESC LIMIT 1", m["conversation_id"], m["id"])
+        return q["content"] if q else ""
+
+    @app.get("/api/admin/feedback")
+    def admin_feedback():
+        """Answers rated bad whose sources are all in logbooks the caller administers (all for global admins)."""
+        mine = {n.lower() for n in admin_logbooks()}
+        if not mine:
+            abort(403)
+        out = []
+        for m in db.all("""SELECT m.*, c.user FROM messages m JOIN conversations c ON c.id = m.conversation_id
+                           WHERE m.role = 'assistant' AND m.feedback = -1 ORDER BY m.id DESC LIMIT 200"""):
+            srcs = db.jl(m["sources_json"])
+            lbs = sorted({s["logbook"] for s in srcs})
+            if not g.user.admin and not (lbs and all(lb.lower() in mine for lb in lbs)):
+                continue
+            out.append({"id": m["id"], "user": m["user"], "at": m["at"], "question": question_of(m),
+                        "answer": m["content"], "comment": m["comment"] or "", "sources": srcs, "logbooks": lbs})
+        return jsonify(out)
+
+    @app.post("/api/admin/feedback/<int:mid>/suggest")
+    def admin_feedback_suggest(mid):
+        mine = admin_logbooks()
+        if not mine:
+            abort(403)
+        m = db.get("SELECT * FROM messages WHERE id = ? AND role = 'assistant'", mid)
+        if not m:
+            abort(404)
+        lbs = [lb for lb in sorted({s["logbook"] for s in db.jl(m["sources_json"])}) if lb in mine]
+        msg = (f"Logbooks: {', '.join(lbs or mine)}\nQuestion: {question_of(m)}\n\n"
+               f"Answer that was rated bad:\n{m['content']}\n\nUser's comment: {m['comment'] or '(none)'}")
+        with acting_user(g.user.key), ai.gate.interactive():
+            raw = ai.chat.chat([{"role": "user", "content": msg}], system=prompts.note_system(), json_mode=True,
+                               max_tokens=400, task="note")
+        try:
+            sug = providers.parse_json(raw)
+            lb = sug.get("logbook") if sug.get("logbook") in mine else (lbs or mine)[0]
+            return jsonify({"logbook": lb, "note": str(sug.get("note") or "")[:1000]})
+        except (ValueError, AttributeError):
+            return jsonify({"logbook": (lbs or mine)[0], "note": ""})
+
+    @app.get("/api/admin/notes")
+    def admin_notes():
+        mine = admin_logbooks()
+        if not mine:
+            abort(403)
+        ids = [ix.logbooks[n] for n in mine]
+        rows = db.all(f"""SELECT n.*, l.name AS logbook FROM notes n JOIN logbooks l ON l.id = n.logbook_id
+                          WHERE n.logbook_id IN ({','.join('?' * len(ids))}) ORDER BY l.name, n.id""", *ids)
+        return jsonify({"logbooks": mine,
+                        "notes": [{"id": r["id"], "logbook": r["logbook"], "text": r["text"], "by": r["created_by"],
+                                   "at": r["at"]} for r in rows],
+                        "config": {n: (ix.cfg.sections.get(n.lower(), {}).get("ai context", "") if ix.cfg else "")
+                                   for n in mine}})
+
+    @app.post("/api/admin/notes")
+    def admin_note_add():
+        b = request.get_json(force=True)
+        lb, text = b.get("logbook", ""), (b.get("text") or "").strip()[:1000]
+        if not text:
+            abort(400)
+        if lb not in admin_logbooks():
+            abort(403)
+        db.run("INSERT INTO notes (logbook_id, text, created_by, at, message_id) VALUES (?,?,?,?,?)",
+               ix.logbooks[lb], text, g.user.key, db.now(), b.get("message_id"))
+        ai.ctx.refresh(force=True)        # new versions: the logbook is analysed again with the note
+        return jsonify({"ok": True})
+
+    @app.delete("/api/admin/notes/<int:nid>")
+    def admin_note_delete(nid):
+        r = db.get("SELECT n.id, l.name FROM notes n JOIN logbooks l ON l.id = n.logbook_id WHERE n.id = ?", nid)
+        if not r or r["name"] not in admin_logbooks():
+            abort(404)
+        db.run("DELETE FROM notes WHERE id = ?", nid)
+        ai.ctx.refresh(force=True)
         return jsonify({"ok": True})
 
     # ---- digests -------------------------------------------------------------------------------
@@ -285,9 +445,27 @@ def create_app(conf: dict, start_worker: bool = True) -> Flask:
         ids = insights.entity_timeline(allowed(), request.args.get("value", ""))
         return jsonify({"entries": search.rows_for(ids)})
 
+    @app.get("/api/alerts")
+    def get_alerts():
+        return jsonify(alerts.recent(allowed()))
+
+    @app.get("/api/handovers")
+    def get_handovers():
+        return jsonify(digest.handovers(allowed(), ix))
+
+    @app.post("/api/handover")
+    def make_handover():
+        b = request.get_json(force=True)
+        with acting_user(g.user.key), ai.gate.interactive():
+            return jsonify(digest.handover(ai, logbook_id(b.get("logbook", "")), day_arg(b.get("date"))))
+
+    @app.get("/api/insights/lifecycle")
+    def ins_lifecycle():
+        return jsonify(insights.lifecycle(allowed(), request.args.get("value", ""), ix.cfg))
+
     @app.get("/api/insights/runs")
     def ins_runs():
-        return jsonify(insights.runs(allowed(), request.args.get("q", "")))
+        return jsonify(insights.runs(allowed(), request.args.get("q", ""), ctx=ai.ctx))
 
     @app.get("/api/insights/activity")
     def ins_activity():
@@ -328,7 +506,8 @@ def create_app(conf: dict, start_worker: bool = True) -> Flask:
                        f"Current values: {json.dumps(b.get('attrs') or {}, ensure_ascii=False)}\n"
                        f"Subject: {subject or '(empty)'}\n\nText:\n{text}")
                 with ai.gate.interactive():
-                    raw = ai.fast.chat([{"role": "user", "content": msg}], system=prompts.suggest_system(),
+                    notes = ai.ctx.notes([lb]) if ai.ctx else ""
+                    raw = ai.fast.chat([{"role": "user", "content": msg}], system=prompts.suggest_system(notes),
                                        json_mode=True, max_tokens=500, task="suggest")
                 try:
                     s = providers.parse_json(raw)
@@ -421,6 +600,9 @@ def main(argv=None):
     p.add_argument("--env-file", help="read settings from this .env file")
     p.add_argument("--no-worker", action="store_true", help="serve only, no background analysis")
     p.add_argument("--scan", action="store_true", help="index the logbooks once and exit")
+    p.add_argument("--eval", metavar="QUESTIONS.jsonl", help="run the evaluation questions and exit")
+    p.add_argument("--eval-no-answer", action="store_true", help="evaluate retrieval only (no model answers)")
+    p.add_argument("--eval-out", metavar="REPORT.json", default="", help="write the full evaluation report")
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     if args.env_file:
@@ -438,6 +620,13 @@ def main(argv=None):
         db.init(conf["state_dir"])
         ix = Indexer(conf["elogd_cfg"])
         print(ix.scan())
+        return
+    if args.eval:
+        from . import evaluate
+        app = create_app(conf, start_worker=False)
+        x = app.extensions["elogai"]
+        x["ix"].scan()
+        evaluate.print_report(evaluate.run(x["ai"], x["ix"], args.eval, not args.eval_no_answer, args.eval_out))
         return
     try:
         app = create_app(conf, start_worker=not args.no_worker)

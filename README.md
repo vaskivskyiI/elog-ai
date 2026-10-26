@@ -81,6 +81,75 @@ for all logbooks, in the background.
 * Conversations are private to their user. `tests/test_permissions.py` checks all of the above for
   two users against a fake elogd, with and without the fork's access endpoint.
 
+## Logbook notes and related logbooks
+
+Two settings in `elogd.cfg` (editable in the ELOG Manager like any other) tell the AI how to read
+a logbook and which logbooks belong together:
+
+```
+[global]
+AI context = Entries are in English or Slovenian. Values without units in attributes are in the units of the attribute name.
+
+[Nanoprobe]
+AI context = STM in UHV. Moving samples or tips between carousel positions (C01-C28, L01-L05) is routine
+  bookkeeping: do not mention it. Important: moves to or from the measuring stage (MP), tip changes and
+  conditioning, measurement conditions (temperature, field, bias, setpoint), cryogen refills only if late.
+AI related = np*, NP-Optics, UHV Suitcase
+
+[np005]
+AI context = pages/np-ai.txt            # long notes: a .txt/.md file in the logbook directory
+
+[4dmag]
+AI context = Time-resolved HHG setup. Routine: DAQ "Run started" entries. Important: alignment, fluence,
+  sample changes, laser problems.
+AI related = 4d0*, Legend, Pharos, N2 MIKS-1L
+
+[Legend]
+AI context = Daily power readings (Legend OUT, Mantis CW/ML, T, HUM) are routine unless they deviate.
+```
+
+(Each setting is one line in `elogd.cfg`; the line breaks above are only for reading.)
+
+* **`AI context`** (logbook or `[global]`): instructions added to every prompt about the logbook:
+  entry analysis, digests, thread summaries, answers, writing help. Say what matters and what is
+  routine; routine entries are classed as such and left out of digests. Changing the notes re-analyses
+  that logbook (and the logbooks related to it) in the background.
+* **`AI related`** (logbook): names or wildcards; it works both ways, so `np*` on Nanoprobe also
+  relates each `npXXX` to Nanoprobe. Related logbooks are used
+  * in **answers**, unless the question is limited to one logbook: a question naming np005 also
+    searches Nanoprobe, and for the best results the state of the related logbooks at that time is
+    added: their last entries before it, however old (conditions are often stable for days), entries
+    matching the question from the two weeks before, and the next day after;
+  * in the **entry panel and quick view**: "*Nanoprobe at that time*": the last entries of related
+    logbooks before the entry (with how long before), the day after, and their last numeric readings;
+  * in **digests and entry analysis**, which every reader of the logbook sees: only related
+    logbooks that all readers of this logbook can read too. With today's `Login user` lists, an
+    np005 digest uses Nanoprobe (open to everybody), but the Nanoprobe digest does not use np005
+    (restricted).
+
+What a user sees from related logbooks always goes through their own access: a user who cannot
+read Nanoprobe gets nothing from it, in answers or in the panel.
+
+## More features
+
+All are switched on per logbook in `elogd.cfg` where they need a setting; mail goes through elogd's
+own `SMTP host` (`SMTP port`, `SMTP username`, `SMTP password`, `Use Email from`).
+
+| Feature | Setting | What it does |
+|---|---|---|
+| **Item histories** | `AI track = Carousel, MP` (optional) | For a sample, tip or serial number: where it was and for how long, time on the measuring stage, current position. Built from the `Change note` texts in the entries ("Stage position changed from Removed to Sample"), which keep the history even when entries were edited later, and from attribute changes. Exact data, shown under *Samples & things* and given to the assistant when a question names the item (e.g. S-179: on the stage 9 times, 39 days in total). |
+| **Shift handover** | `AI handover = daily`, optional `AI handover to = ...` | Every morning per instrument logbook: state and last readings, what is on the instrument, open problems, what happened since yesterday (Mondays: since Friday), what to check. On the Overview; e-mailed if `AI handover to` is set. |
+| **Alerts** | `AI alerts = 1`, `AI alerts to = ...`, `AI alert open days = 7` | A reading far from the recent ones (latest value of a numeric attribute), or a problem still open after N days. Raised once, listed on the Overview for the logbook's readers, e-mailed to `AI alerts to` (addresses or ELOG logins; default the logbook's admins). No model calls. |
+| **AI digest by e-mail** | `AI digest = daily\|weekly\|monthly`, `AI digest to = ...` | Sends the AI summary of the past day/week/month; recipients default to ELOG's own `Digest to`, then the admins. |
+| **Reranking** | `AI_RERANK=llm` (default), `off`, or a reranker model | The assistant searches 30 candidates and a model picks the 14 that answer the question. `llm`: one JSON request to the fast model; a model name (e.g. `dengcao/Qwen3-Reranker-4B:Q8_0`): yes/no per candidate. |
+| **Run conditions** | (related logbooks) | Each DAQ run shows the readings of its logbook and related logbooks at run start (e.g. Legend power, temperature). The Runs search takes conditions: `TaS2, Legend OUT > 2.5, HHG_iris.currentposition >= 900`. |
+| **Feedback → notes** | | A bad rating asks what was wrong. Admins of the logbooks (and global admins) see these under *Feedback & notes*; "Suggest a note" drafts an instruction from the answer and the comment. Notes are stored here and added to the logbook's `AI context`; the logbook is then analysed again. |
+| **MCP / Connect** | | *Connect* creates personal tokens. With one, Claude Desktop, Claude Code or any MCP client uses the logbooks as you: `claude mcp add --transport http elog https://f7-elog.ijs.si/ai/mcp --header "Authorization: Bearer eai_..."`. Tools: search, ask, get_entry, summary, item_history, runs, list_logbooks. Without a browser session, a token's logbooks follow `elogd.cfg` with elogd's rules (`Login user`/`Admin user`, guest access); a deactivated or deleted account's tokens stop working. |
+| **Evaluation** | | `python -m elogai --env-file .env --eval eval/questions.jsonl` runs real questions (see `eval/questions.example.jsonl`: question, expected entries, keywords) and reports retrieval recall and rank, citations of the expected entries, keyword hits and time. Run it before changing models or prompts; `--eval-no-answer` checks retrieval only, `--eval-out report.json` keeps the answers. |
+
+The **side panel** ("Ask AI") keeps its conversation per browser tab: clicking a source opens the
+entry and the same chat is there again (on wide screens next to the page, not over it).
+
 ## How the data is analysed and stored
 
 One SQLite database (WAL) in `ELOGAI_STATE_DIR`; everything in it can be rebuilt from the logbook
@@ -188,6 +257,7 @@ everything except answer quality can be tested without a model.
 ## Layout
 
 ```
+elogai/context.py    per-logbook notes (AI context, feedback notes) and related logbooks (AI related)
 elogai/elogsrc.py    elogd.cfg reader, logbook file parser, HTML to text, run .ini parser
 elogai/indexer.py    incremental scan, entities, runs, threads, numeric attributes
 elogai/db.py         SQLite schema (append-only migrations) and helpers
@@ -196,9 +266,14 @@ elogai/ai.py         configured providers, privacy rule, usage accounting, inter
 elogai/vectors.py    chunking, float16 storage, in-memory similarity search
 elogai/enrich.py     embeddings, per-entry analysis, image descriptions
 elogai/search.py     hybrid search, similar entries
+elogai/rerank.py     reranking of the assistant's candidates
 elogai/assistant.py  question answering with retrieval and citations
-elogai/digest.py     period and thread summaries, morning schedule
-elogai/insights.py   problems, series and outliers, entities, runs, activity
+elogai/digest.py     period and thread summaries, handovers, morning schedule, digest e-mail
+elogai/insights.py   problems, series and outliers, entities, item histories, runs and their conditions, state at a time
+elogai/alerts.py     alerts
+elogai/mailer.py     e-mail via elogd's SMTP settings
+elogai/mcp.py        MCP server for Claude and other assistants
+elogai/evaluate.py   evaluation with real questions
 elogai/auth.py       ELOG session → user and readable logbooks (asks elogd)
 elogai/worker.py     background threads
 elogai/app.py        Flask API, pages

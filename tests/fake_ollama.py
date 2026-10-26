@@ -30,6 +30,14 @@ def embed(text: str) -> list[float]:
 
 def answer(messages: list[dict], json_mode: bool) -> str:
     last = messages[-1]["content"]
+    if "was rated bad" in messages[0]["content"]:              # feedback: propose a note
+        lb = re.search(r"Logbooks: ([^,\n]+)", last)
+        return json.dumps({"logbook": lb.group(1).strip() if lb else "", "note": "MP is the measuring position."})
+    if "You judge which" in messages[0]["content"]:          # rerank: score by shared words
+        q = set(re.findall(r"\w{4,}", last.split("Entries:", 1)[0].lower()))
+        docs = re.split(r"### (\d+)\n", last)[1:]
+        return json.dumps({"scores": [{"i": int(docs[i]), "score": len(q & set(re.findall(r"\w{4,}", docs[i + 1].lower())))}
+                                      for i in range(0, len(docs), 2)]})
     ids = re.findall(r"### id=(\d+)", last)
     if ids:
         items = []
